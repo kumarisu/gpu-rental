@@ -427,7 +427,8 @@ services:
     restart: unless-stopped
     environment:
       # The browser needs a URL it can reach, so the FRONT uses the PUBLIC urls.
-      LAGO_API_URL: ${LAGO_API_URL}
+      # NB: the front image's .env.sh reads API_URL (not LAGO_API_URL).
+      API_URL: ${LAGO_API_URL}
       LAGO_FRONT_URL: ${LAGO_UI_URL}
       APP_ENV: production
     depends_on:
