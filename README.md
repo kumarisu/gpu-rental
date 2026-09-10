@@ -41,6 +41,85 @@ what cAdvisor exposes to Prometheus and what lets every metric/log be attributed
 
 ---
 
+## Data flows
+
+Where data moves **from → to**, what **triggers** it, and which component **carries**
+it. The per-user attribution key for the whole platform is the Docker label
+`coder.owner` (container `coder-<user>-<workspace>`): cAdvisor exposes it to
+Prometheus as `container_label_coder_owner`, Promtail/Loki carries it as
+`container_name`, and billing-sync maps it to the Lago `external_customer_id`.
+
+### 1. Initial bootstrap data (`make init`)
+
+Trigger: **operator runs `make up` once, then `make init`**. All three sub-steps are
+idempotent (safe to re-run; required again after `make clean -v` wipes volumes).
+
+| Step (`make …`) | Data (from → to) | Trigger | Carrier |
+|---|---|---|---|
+| (auto) Lago org create | `.env` (`LAGO_ORG_*`, `LAGO_CREATE_ORG=true`) → `lago-db` (`organizations`, `api_keys`) | first boot of `lago-api` | `lago-api` Rails initializer (in-process, no network hop) |
+| `keycloak-init` | `.env` (realm name, client secrets, demo passwords) → Keycloak: realm `gpu-rental`, OIDC clients `coder`/`grafana`, users `mike`/`anna` | operator command (`--profile init run --rm keycloak-init`) | one-shot container `keycloak-init` (`keycloak/init.py`, stdlib `urllib`) → Keycloak Admin REST over `KEYCLOAK_INTERNAL=http://keycloak:8080` |
+| `grafana-init` | `monitoring/grafana/provisioning/*` + `dashboards/gpu-usage.json` → Grafana datasources + dashboard "GPU Rental — Usage per user" (UID substitution `__DS_*__`) | operator command, after Grafana healthy | one-shot container `grafana-init` (`monitoring/grafana/init.py`) → Grafana HTTP API `http://grafana:3000/api/...` (Basic `admin` / `GRAFANA_ADMIN_PASSWORD`) |
+| `lago-bootstrap` | plan definition in code → Lago: 4 billable metrics (`cpu_seconds`, `ram_gb_hours`, `network_gb`, `disk_write_gb`), plan `gpu-usage` + per-unit prices, customers + subscriptions for `LAGO_DEMO_USERS` | operator command, after Lago `/health` = 200 and `LAGO_ORG_API_KEY` valid | one-shot container `lago-bootstrap` (`billing/lago/bootstrap.py`) → Lago REST `POST /api/v1/{billable_metrics,plans,customers,subscriptions}` over `LAGO_API_INTERNAL` (Bearer org key) |
+
+```
+.env ──(keycloak-init, Admin REST)──▶ Keycloak :8080 (realm, clients, users)
+provisioning/*.yaml + gpu-usage.json ──(grafana-init, Grafana API)──▶ Grafana :3000
+bootstrap.py ──(POST /api/v1/*, Bearer key)──▶ Lago API :8000 ──▶ lago-db / lago-redis
+```
+
+### 2. Creating a new workspace (workspace data flow)
+
+Trigger: **user clicks "Create workspace" in Coder UI**. Prerequisite, done once per
+template version by the operator: `make template-images` builds
+`gpu-rental/ws-cpu|ws-gpu`, then `make push-templates TOKEN=<owner-token>` publishes
+`cpu-base`/`gpu-cuda` via the `coder` CLI *inside* the `coder` container talking to
+`CODER_URL`.
+
+```
+Browser ──OIDC login (Keycloak)──▶ Coder :7080 ──terraform apply──▶ Docker daemon (/var/run/docker.sock)
+       ◀── workspace agent (SSH/terminal) ── container coder-<user>-<ws> + volume coder-<id>-home
+```
+
+| Hop | Data (from → to) | Trigger | Carrier |
+|---|---|---|---|
+| Browser → Coder | OIDC code → session; workspace spec (template version + params: image, CPU/RAM) | user submits the "New workspace" form | Coder UI → `coder-server` (`POST /api/v2/...`, session cookie; identity verified against Keycloak `gpu-rental` realm) |
+| Coder → Docker daemon | Terraform plan (`coder/templates/<name>/main.tf`: `docker_container` + `docker_volume`, labels `coder.owner`, `coder.workspace_id`, …) → running container `coder-<user>-<ws>` + persistent home volume | provisioner job picks up the build (`terraform apply`) | built-in Coder provisioner inside `coder-server` → Docker provider → `/var/run/docker.sock` (needs `DOCKER_GROUP_GID` so uid `1000/coder` can dial the socket) |
+| Workspace → user | agent startup + image (`codercom/example-base` or `gpu-rental/ws-*`) → live terminal/IDE over the agent tunnel | container start | Coder agent process inside the workspace container (reverse tunnel back to `coder-server`) |
+
+The new container immediately starts emitting metrics/logs, so flows 3 and 4 pick it
+up automatically — no registration step needed because discovery is label-based
+(`container_label_coder_owner!=""`).
+
+### 3. (next: usage → Grafana — see below)
+
+      (runs every 60s)
+    ░░░░░░░░║
+    ░░░░░░░░║  POST /api/v1/events
+            ║  properties: {event_name:"gpu.usage",
+            ║    data: {customer_id:"mike", # external_customer_id
+            ║            properties:{cpu_seconds: 49.07, ram_gb_hours:0.002, network_gb:0.004,...}}
+            ║
+   ┌━━━━━━━━■━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┐ 
+   │  Lago API  (lago-api:3000)                                                  │
+   │  ┣━ receives event → agg per customer per plan (sum) → accumulates          │
+   │  ┣━ API keys (LAGO_ORG_API_KEY) authorized; idempotent (event id)           │
+   │  ┗━ used by Lago billing worker to produce invoice per period               │
+   └─────────────────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+   ┌━━━━━━━━■━━━━━━━━━━━ Lago UI  (http://localhost:8580) ─────────────────────┐
+   │  • Developer → API keys  (copy LAGO_ORG_API_KEY into .env)                 │
+   │  • Customers → mike / anna (external_id) + subscription → plan gpu-usage   │
+   │  • Usage / Invoices → shows accumulated usage + charges per billing period  │
+   └──────────────────────────────────────────────────────────────────────────────┘
+   ```
+
+   > **Onboarding (automatic org + API key):** if `LAGO_CREATE_ORG=true`, the first boot of
+   > `lago-api` self-creates the organisation + an API key + admin sign-in inside the container
+   > before any operator API call. This seed is the foundation that `lago-bootstrap` and
+   > `billing-sync` depend on. Re-run `make lago-bootstrap` to re-create metric/plan/customer
+   > data after a DB wipe (`make clean -v`).
+
 ## Requirements
 
 - **Linux host** (recommended for production) with Docker Engine ≥ 24 + Docker Compose v2.
