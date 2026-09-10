@@ -203,6 +203,8 @@ services:
     restart: unless-stopped
     privileged: true
     volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /sys:/sys:ro
       - /etc/machine-id:/etc/machine-id:ro
