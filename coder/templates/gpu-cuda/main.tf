@@ -16,9 +16,9 @@ variable "docker_socket" {
 }
 
 variable "shm_size" {
-  default     = "1g"
-  description = "Shared memory size (PyTorch/Databricks need extended /dev/shm)."
-  type        = string
+  default     = 1073741824
+  description = "Shared memory size in bytes (PyTorch/Databricks need extended /dev/shm)."
+  type        = number
 }
 
 variable "gpu_selector" {

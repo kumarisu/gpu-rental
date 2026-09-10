@@ -63,10 +63,10 @@ coder-convert-login:               ## Repair Coder OIDC access for @gpu.local ac
 
 push-templates:                    ## Push Coder templates — make push-templates TOKEN=<cli token from Coder UI>
 	@test -n "$(TOKEN)" || { echo "usage: make push-templates TOKEN=<cli token from Coder UI>  (Settings → Tokens)"; exit 1; }
-	$(DOCKER_COMPOSE) exec -T coder-server /bin/bash -lc \
-	  "echo '$(TOKEN)' | coder login $(CODER_URL) --use-token-as-session && \
-	   coder templates push -y --directory /templates/gpu-cuda && \
-	   coder templates push -y --directory /templates/cpu-base"
+	@$(DOCKER_COMPOSE) exec -T coder /bin/bash -lc \
+	  "echo '$(TOKEN)' | /opt/coder login $(CODER_URL) --use-token-as-session && \
+	   /opt/coder templates push -y --directory /templates/gpu-cuda && \
+	   /opt/coder templates push -y --directory /templates/cpu-base"
 
 billing-sync-logs:                 ## Follow billing-sync logs
 	$(DOCKER_COMPOSE) logs -f billing-sync
