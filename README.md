@@ -99,19 +99,19 @@ up automatically — no registration step needed because discovery is label-base
             ║    data: {customer_id:"mike", # external_customer_id
             ║            properties:{cpu_seconds: 49.07, ram_gb_hours:0.002, network_gb:0.004,...}}
             ║
-   ┌━━━━━━━━■━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┐ 
-   │  Lago API  (lago-api:3000)                                                  │
-   │  ┣━ receives event → agg per customer per plan (sum) → accumulates          │
-   │  ┣━ API keys (LAGO_ORG_API_KEY) authorized; idempotent (event id)           │
-   │  ┗━ used by Lago billing worker to produce invoice per period               │
-   └─────────────────────────────────────────────────────────────────────────────┘
-            │
+   ┌━━━━━━━━■━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┐                                                                                                            
+   │  Lago API  (lago-api:3000)                                                  │                                                                                                            
+   │  ┣━ receives event → agg per customer per plan (sum) → accumulates          │                                                                                                            
+   │  ┣━ API keys (LAGO_ORG_API_KEY) authorized; idempotent (event id)           │                                                                                                            
+   │  ┗━ used by Lago billing worker to produce invoice per period               │                                                                                                            
+   └─────────────────────────────────────────────────────────────────────────────┘                                                                                                            
+            │                                                                                                                                                                                 
             ▼
-   ┌━━━━━━━━■━━━━━━━━━━━ Lago UI  (http://localhost:8580) ─────────────────────┐
-   │  • Developer → API keys  (copy LAGO_ORG_API_KEY into .env)                 │
-   │  • Customers → mike / anna (external_id) + subscription → plan gpu-usage   │
-   │  • Usage / Invoices → shows accumulated usage + charges per billing period  │
-   └──────────────────────────────────────────────────────────────────────────────┘
+   ┌━━━━━━━━■━━━━━━━━━━━ Lago UI  (http://localhost:8580) ────────────────────────┐                                                                                                          
+   │  • Developer → API keys  (copy LAGO_ORG_API_KEY into .env)                   │                                                                                                           
+   │  • Customers → mike / anna (external_id) + subscription → plan gpu-usage     │                                                                                                           
+   │  • Usage / Invoices → shows accumulated usage + charges per billing period   │                                                                                                           
+   └──────────────────────────────────────────────────────────────────────────────┘                                                                                                           
    ```
 
    > **Onboarding (automatic org + API key):** if `LAGO_CREATE_ORG=true`, the first boot of
