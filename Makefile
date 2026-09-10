@@ -7,7 +7,7 @@ export
 DOCKER_COMPOSE := docker compose
 
 .PHONY: help secrets init up down restart ps logs \
-        keycloak-init grafana-init lago-bootstrap \
+        keycloak-init grafana-init lago-bootstrap coder-convert-login \
         push-templates billing-sync-logs doctor clean
 
 help:                              ## Show available targets
@@ -51,6 +51,15 @@ grafana-init:                      ## Import Grafana datasources & dashboards
 
 lago-bootstrap:                    ## Create Lago billable metrics, plan, demo customers/subscriptions
 	$(DOCKER_COMPOSE) --profile init run --rm lago-bootstrap
+
+coder-convert-login:               ## Repair Coder OIDC access for @gpu.local accounts
+	# 1) Accounts created via password auth (e.g. first-time setup) before
+	#    OIDC was enabled reject OIDC logins with "Incorrect login type" —
+	#    flip them to login_type=oidc.
+	# 2) If the Keycloak users were recreated (new subject IDs), stale links
+	#    make Coder refuse logins with "account already linked to different
+	#    identity" — drop them so the next OIDC login re-links cleanly.
+	docker exec coder-db psql -U coder -d coder -c "UPDATE users SET login_type='oidc' WHERE login_type='password' AND email LIKE '%@gpu.local'; DELETE FROM user_links WHERE login_type='oidc' AND user_id IN (SELECT id FROM users WHERE email LIKE '%@gpu.local');"
 
 push-templates:                    ## Push Coder templates — make push-templates TOKEN=<cli token from Coder UI>
 	@test -n "$(TOKEN)" || { echo "usage: make push-templates TOKEN=<cli token from Coder UI>  (Settings → Tokens)"; exit 1; }

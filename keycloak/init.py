@@ -123,6 +123,25 @@ def create_realm(token):
         raise SystemExit(f"could not create realm (http {code})")
 
 
+def ensure_realm_login_policy(token):
+    """Disable 'email as username' on the realm.
+
+    Realms created manually in the admin UI often have
+    registrationEmailAsUsername=true: Keycloak then forces username==email,
+    the documented short demo logins (`mike`) stop working and username
+    updates via the Admin API fail with error-user-attribute-read-only.
+    Logging in with the email address keeps working either way.
+    """
+    code, realm = http("GET", f"{KC}/admin/realms/{REALM}", token=token)
+    if code != 200 or not isinstance(realm, dict):
+        print(f"  ! cannot read realm '{REALM}' (http {code})")
+        return
+    if realm.get("registrationEmailAsUsername"):
+        code, _ = http("PUT", f"{KC}/admin/realms/{REALM}",
+                       data={"registrationEmailAsUsername": False}, token=token)
+        print(f"  realm '{REALM}' registrationEmailAsUsername -> false (http {code})")
+
+
 def client_payload(client_id, secret, uris):
     return {
         "clientId": client_id,
@@ -156,8 +175,25 @@ def create_client(token, client_id, secret, uris):
 def create_user(token, username, password, first, last):
     email = f"{username}@{EMAIL_DOMAIN}"
     _, users = http("GET", f"{KC}/admin/realms/{REALM}/users?username={username}&exact=true", token=token)
+    if not users:
+        # Accounts created manually in the admin UI often use the email as
+        # the username — the exact username search above misses them and the
+        # create below only surfaces the conflict as an opaque 409. Match by
+        # email as well before giving up.
+        _, users = http("GET", f"{KC}/admin/realms/{REALM}/users?email={email}&exact=true", token=token)
     if users:
-        print(f"  user '{username}' already exists")
+        user = users[0]
+        if str(user.get("username", "")).lower() != username:
+            # Align the username with the documented demo login (`mike`).
+            # Logging in with the email address keeps working either way.
+            code, _ = http("PUT", f"{KC}/admin/realms/{REALM}/users/{user['id']}",
+                           data={"username": username}, token=token)
+            if code in (200, 204):
+                print(f"  user '{email}' username aligned to '{username}'")
+            else:
+                print(f"  ! could not align username for '{email}' (http {code})")
+        else:
+            print(f"  user '{username}' already exists")
         return
     payload = {
         "username": username,
@@ -190,6 +226,7 @@ def main():
     # The built-in 'master' realm (admin console) also defaults to
     # sslRequired=external, which blocks browser access over HTTP.
     ensure_realm_http(token, "master")
+    ensure_realm_login_policy(token)
 
     create_client(
         token, "coder", CODER_SECRET,
