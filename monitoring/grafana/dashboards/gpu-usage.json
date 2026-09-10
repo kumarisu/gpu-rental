@@ -1,0 +1,167 @@
+{
+  "dashboard": {
+    "schemaVersion": 1,
+    "title": "GPU Rental — Usage per user",
+    "tags": ["gpu-rental"],
+    "time": { "from": "now-24h", "to": "now" },
+    "description": "Usage of Coder workspace containers, attributed per user via the coder.owner label exposed by cAdvisor. Logs come from Loki (docker json-file, tag={{.Name}}).",
+    "panels": [
+      {
+        "id": 1,
+        "type": "timeseries",
+        "title": "CPU used (cores) — per user",
+        "description": "deriv() of the per-container CPU-seconds counter exposed by cAdvisor.",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "rate(container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"})" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "transparent": false
+      },
+      {
+        "id": 2,
+        "type": "timeseries",
+        "title": "Memory used (GiB) — per user",
+        "ds_display_type": "overrides",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "container_memory_usage_bytes{container_label_coder_owner!=\"\"} / 1073741824" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "transparent": false
+      },
+      {
+        "id": 3,
+        "type": "timeseries",
+        "title": "Network in (KiB/s) — per user",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "rate(container_network_receive_bytes_total{container_label_coder_owner!=\"\"}) / 1024" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "transparent": false
+      },
+      {
+        "id": 4,
+        "type": "timeseries",
+        "title": "Network out (KiB/s) — per user",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "rate(container_network_transmit_bytes_total{container_label_coder_owner!=\"\"}) / 1024" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "transparent": false
+      },
+{
+        "id": 5,
+        "type": "timeseries",
+        "title": "GPU utilization % (host GPUs) — optional exporter",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "gpu_utilization_percent{gpu=~\".*\"}" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+        "transparent": false
+      },
+      {
+        "id": 6,
+        "type": "timeseries",
+        "title": "Disk write (KiB/s) — per user",
+        "datasource": { "type": "prometheus", "uid": "__DS_PROMETHEUS__" },
+        "fieldConfig": {
+          "source": {
+            "metrics": [],
+            "queries": [
+              { "refId": "A", "query": "rate(container_fs_write_bytes_total{container_label_coder_owner!=\"\"}) / 1024" }
+            ],
+            "prometheusVersion": "2.x",
+            "instant": false
+          },
+          "options": {
+            "legend": { "showLegend": true, "placement": "bottom", "showName": true, "showValues": true, "values": { "min": true, "max": true, "avg": true, "total": false, "current": true } },
+            "tooltip": { "shared": true, "sort": 0, "valueType": "individual" }
+          },
+          "intervalKnobs": { "timeMode": "picker", "interval": "" }
+        },
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+        "transparent": false
+      },
+      {
+        "id": 7,
+        "type": "logs",
+        "title": "Workspace logs (docker containers)",
+        "description": "LogQL: all docker logs; filter per workspace e.g. {container_name=\"coder-mike-gpu01\"}",
+        "datasource": { "type": "loki", "uid": "__DS_LOKI__" },
+        "expr": "{job=\"docker\"} | limit 200",
+        "showTime": true,
+        "fieldConfig": {
+          "source": { "logMode": "query", "queries": [{ "refId": "A" }] }
+        },
+        "gridPos": { "h": 12, "w": 24, "x": 0, "y": 32 },
+        "transparent": false
+      }
+    ]
+  },
+  "overwrite": true,
+  "version": 0
+}

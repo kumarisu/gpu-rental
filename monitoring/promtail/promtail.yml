@@ -1,0 +1,25 @@
+# Promtail — ships Docker container logs to Loki.
+#
+# Each log line of a Docker `json-file` container comes as JSON:
+#   {"log":"...","time":"...","stream":"stdout"}  (+ "tag" when the daemon sets
+#   log-opts tag, see README → "Logging": tag={{.Name}})
+#
+# The `json` parser turns each line into fields (log/time/stream/tag) and the
+# `container_name` label is promoted from the daemon's `tag` field, so Grafana
+# can filter per container, e.g. {container_name="coder-mike-gpu01"}.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 9081
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    label: primary
+
+sources:
+  - file:
+      - /var/lib/docker/containers/*/*-json.log
+    parsers:
+      - json: {}                     # parse each docker json line into fields
+    labels:
+      job: docker
+      container_name: '{{ .tag }}'   # promoted from the daemon's log-opts tag={{.Name}}

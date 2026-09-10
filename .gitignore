@@ -1,0 +1,19 @@
+# Secrets & local overrides
+.env
+
+# Runtime data (state files, databases mounted from the host, etc.)
+/data/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Coder / Keycloak local config
+coder/data/
+keycloak/data/

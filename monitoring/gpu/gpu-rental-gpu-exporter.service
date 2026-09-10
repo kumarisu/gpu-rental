@@ -1,0 +1,17 @@
+[Unit]
+Description=GPU Rental — NVIDIA GPU Prometheus exporter
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment=GPU_EXPORTER_PORT=9091
+ExecStart=/usr/bin/python3 /opt/gpu-rental-infra/monitoring/gpu/host_gpu_exporter.py
+Restart=always
+RestartSec=5
+
+# Needs read access to the Docker socket to map PIDs -> containers
+Group=docker
+
+[Install]
+WantedBy=multi-user.target

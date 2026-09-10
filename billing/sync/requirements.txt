@@ -1,0 +1,2 @@
+# billing-sync uses the Python standard library only (urllib, sqlite3, json).
+# Kept as a real requirements file for future dependencies.

@@ -1,0 +1,498 @@
+name: gpu-rental-infra
+
+###############################################################################
+# GPU Rental Infra — self-hosted stack
+#
+#   Keycloak (SSO)  ->  Coder (Docker workspaces)  ->  Prometheus/cAdvisor/Loki/Grafana
+#                                          └──────►  Lago (usage billing) <── billing-sync
+#
+# Targets a Linux Docker host. All CHANGE_* values come from `.env`.
+###############################################################################
+
+volumes:
+  keycloak_db_data:
+  coder_db_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  loki_wal:
+  lago_db_data:
+  lago_redis_data:
+  lago_storage_data:
+  billing_sync_state:
+
+networks:
+  default:
+    name: gpu-rental-net
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lago environment anchors (mirror the official getlago/lago docker-compose)
+# ─────────────────────────────────────────────────────────────────────────────
+x-lago-api-url: &lago-api-url
+  LAGO_API_URL: ${LAGO_API_INTERNAL}
+
+x-lago-front-url: &lago-front-url
+  LAGO_FRONT_URL: ${LAGO_UI_URL}
+
+x-lago-backend-env: &lago-backend-env
+  DATABASE_URL: "postgresql://lago:${LAGO_PG_PASSWORD}@lago-db:5432/lago?search_path=${LAGO_PG_SCHEMA:-public}"
+  REDIS_URL: "redis://${LAGO_REDIS_PASSWORD:+:${LAGO_REDIS_PASSWORD}@}lago-redis:6379"
+  SECRET_KEY_BASE: ${LAGO_SECRET_KEY_BASE}
+  RAILS_ENV: production
+  RAILS_LOG_TO_STDOUT: "true"
+  LAGO_RSA_PRIVATE_KEY: ${LAGO_RSA_PRIVATE_KEY}
+  LAGO_SIDEKIQ_WEB: "false"
+  LAGO_ENCRYPTION_PRIMARY_KEY: ${LAGO_ENCRYPTION_PRIMARY_KEY}
+  LAGO_ENCRYPTION_DETERMINISTIC_KEY: ${LAGO_ENCRYPTION_DETERMINISTIC_KEY}
+  LAGO_ENCRYPTION_KEY_DERIVATION_SALT: ${LAGO_ENCRYPTION_KEY_DERIVATION_SALT}
+  LAGO_PDF_URL: http://lago-pdf:3000
+  LAGO_DISABLE_SIGNUP: "false"
+  LAGO_DISABLE_PDF_GENERATION: "false"
+  LAGO_CREATE_ORG: ${LAGO_CREATE_ORG:-false}
+  LAGO_ORG_NAME: ${LAGO_ORG_NAME:-}
+  LAGO_ORG_USER_EMAIL: ${LAGO_ORG_USER_EMAIL:-}
+  LAGO_ORG_USER_PASSWORD: ${LAGO_ORG_USER_PASSWORD:-}
+  LAGO_ORG_API_KEY: ${LAGO_ORG_API_KEY:-}
+  LAGO_USE_AWS_S3: "false"
+  LAGO_USE_GCS: "false"
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 1. Keycloak — SSO login (OIDC provider for Coder & Grafana)
+  # ═══════════════════════════════════════════════════════════════════════════
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: keycloak-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+    volumes:
+      - keycloak_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: ["start"]
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL_HOST: keycloak-db
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_URL_USERNAME: keycloak
+      KC_DB_URL_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      # Frontchannel URL (what browsers see) — the public Keycloak URL.
+      KC_HOSTNAME_URL_CONFIG: ${KEYCLOAK_URL}
+      # Backchannel (server-to-server) endpoints use the per-request host,
+      # so Coder/Grafana reach Keycloak via the internal name `keycloak`.
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_PORT: "8080"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: passthrough
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -qE '200|404|401' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2. Coder — workspace templates, Docker-provisioned instances (OIDC login)
+  # ═══════════════════════════════════════════════════════════════════════════
+  coder-db:
+    image: postgres:15-alpine
+    container_name: coder-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: coder
+      POSTGRES_USER: coder
+      POSTGRES_PASSWORD: ${CODER_PG_PASSWORD}
+    volumes:
+      - coder_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coder -d coder"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  coder:
+    image: ghcr.io/coder/coder:latest
+    container_name: coder-server
+    restart: unless-stopped
+    depends_on:
+      coder-db:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    # Linux: add the host `docker` group so the socket is usable.
+    group_add: ["${DOCKER_GROUP_GID:-120}"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./coder/data:/home/coder/.config
+      - ./coder/templates:/templates:ro   # used by `make push-templates`
+    environment:
+      CODER_ACCESS_URL: ${CODER_URL}
+      CODER_PG_CONNECTION_URL: "postgresql://coder:${CODER_PG_PASSWORD}@coder-db:5432/coder"
+      CODER_OIDC_ISSUER_URL: ${KEYCLOAK_INTERNAL}/realms/gpu-rental
+      CODER_OIDC_CLIENT_ID: coder
+      CODER_OIDC_CLIENT_SECRET: ${CODER_OIDC_CLIENT_SECRET}
+      CODER_OIDC_ALLOW_SIGNUPS: "true"
+      CODER_OIDC_IGNORE_EMAIL_VERIFIED: "true"
+      CODER_DISABLE_PASSWORD_AUTH: "true"
+      CODER_VERBOSE: "true"
+    ports:
+      - "7080:7080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+# ═══════════════════════════════════════════════════════════════════════════
+  # 3. Monitoring — cAdvisor (per-container) + node-exporter (host) + Prometheus
+  # ═══════════════════════════════════════════════════════════════════════════
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    command:
+      - --collector.filesystem.ignored-mount-points=/(sys|proc|dev|run)(&|$)
+    ports:
+      - "9100:9100"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /proc:/proc:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    ports:
+      - "9091:8080"
+    command:
+      - --docker_only=true
+      - --store_docker_container_labels=true
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # optional host-side GPU exporter
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 -O - http://127.0.0.1:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 4. Logs — Loki + Promtail (Docker json-file logs, tagged with {{.Name}})
+  # ═══════════════════════════════════════════════════════════════════════════
+  loki:
+    image: grafana/loki:3.6.1
+    container_name: loki
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki_data:/loki/data
+      - loki_wal:/loki/wal
+    ports:
+      - "3100:3100"
+    command: ["-config.file=/etc/loki/loki.yml"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 -O - http://127.0.0.1:3100/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  promtail:
+    image: grafana/promtail:3.6.11
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: ["-config.file=/etc/promtail/promtail.yml"]
+    depends_on:
+      - loki
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 5. Grafana — dashboards (Prometheus + Loki), optional Keycloak OIDC login
+  # ═══════════════════════════════════════════════════════════════════════════
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      # Keycloak OIDC (browser uses the public URL; server-side calls use the internal URL)
+      GF_AUTH_OPENID_ENABLED: "true"
+      GF_AUTH_OPENID_NAME: "Keycloak"
+      GF_AUTH_OPENID_CLIENT_ID: grafana
+      GF_AUTH_OPENID_CLIENT_SECRET: ${GRAFANA_OIDC_CLIENT_SECRET}
+      GF_AUTH_OPENID_AUTH_URI: ${KEYCLOAK_URL}/realms/gpu-rental/protocol/openid-connect/auth
+      GF_AUTH_OPENID_TOKEN_URI: ${KEYCLOAK_INTERNAL}/realms/gpu-rental/protocol/openid-connect/token
+      GF_AUTH_OPENID_USERINFO_URI: ${KEYCLOAK_INTERNAL}/realms/gpu-rental/protocol/openid-connect/userinfo
+      GF_AUTH_OPENID_ISSUER: ${KEYCLOAK_INTERNAL}/realms/gpu-rental
+      GF_AUTH_OPENID_USE_PKCE: "true"
+      GF_AUTH_OPENID_EMAIL_ATTRIBUTE_PATH: email
+      GF_AUTH_OPENID_NAME_ATTRIBUTE_PATH: name
+      GF_AUTH_OPENID_USERNAME_ATTRIBUTE_PATH: preferred_username
+      GF_USERS_AUTO_ASSIGN_ORG: "true"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Viewer
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 2 -O - http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+# ═══════════════════════════════════════════════════════════════════════════
+  # 6. Lago — usage billing (API, worker, clock, frontend, postgres, redis, pdf)
+  #    Flow: billing-sync -> POST /api/v1/events (Bearer LAGO_ORG_API_KEY)
+  # ═══════════════════════════════════════════════════════════════════════════
+  lago-db:
+    image: getlago/postgres-partman:15.0-alpine
+    container_name: lago-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lago
+      POSTGRES_USER: lago
+      POSTGRES_PASSWORD: ${LAGO_PG_PASSWORD}
+      POSTGRES_SCHEMA: public
+    volumes:
+      - lago_db_data:/data/postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lago -d lago"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  lago-redis:
+    image: redis:7-alpine
+    container_name: lago-redis
+    restart: unless-stopped
+    command: --port 6379
+    volumes:
+      - lago_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  lago-migrate:
+    image: getlago/api:v1.53.0
+    container_name: lago-migrate
+    command: ["./scripts/migrate.sh"]
+    environment:
+      <<: *lago-backend-env
+    depends_on:
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+
+  lago-api:
+    image: getlago/api:v1.53.0
+    container_name: lago-api
+    restart: unless-stopped
+    command: ["./scripts/start.api.sh"]
+    environment:
+      <<: [*lago-backend-env, *lago-api-url, *lago-front-url]
+    volumes:
+      - lago_storage_data:/app/storage
+    ports:
+      - "8000:3000"
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 40
+      start_period: 30s
+
+  lago-worker:
+    image: getlago/api:v1.53.0
+    container_name: lago-worker
+    restart: unless-stopped
+    command: ["./scripts/start.worker.sh"]
+    environment:
+      <<: [*lago-backend-env, *lago-api-url]
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+
+  lago-clock:
+    image: getlago/api:v1.53.0
+    container_name: lago-clock
+    restart: unless-stopped
+    command: ["./scripts/start.clock.sh"]
+    environment:
+      <<: [*lago-backend-env, *lago-api-url]
+    depends_on:
+      lago-migrate:
+        condition: service_completed_successfully
+      lago-db:
+        condition: service_healthy
+      lago-redis:
+        condition: service_healthy
+
+  lago-pdf:
+    image: getlago/lago-gotenberg:7.8.2
+    container_name: lago-pdf
+    restart: unless-stopped
+
+  lago-front:
+    image: getlago/front:v1.53.0
+    container_name: lago-front
+    restart: unless-stopped
+    environment:
+      # The browser needs a URL it can reach, so the FRONT uses the PUBLIC urls.
+      LAGO_API_URL: ${LAGO_API_URL}
+      LAGO_FRONT_URL: ${LAGO_UI_URL}
+      APP_ENV: production
+    depends_on:
+      lago-api:
+        condition: service_healthy
+    ports:
+      - "8580:80"
+# ═══════════════════════════════════════════════════════════════════════════
+  # 7. billing-sync — Prometheus deltas -> Lago metered events (per user)
+  #    For every running workspace container it computes usage deltas per window
+  #    and POSTs them to Lago as metered SUM events.
+  # ═══════════════════════════════════════════════════════════════════════════
+  billing-sync:
+    build: ./billing/sync
+    container_name: billing-sync
+    restart: unless-stopped
+    environment:
+      PROMETHEUS_URL: ${PROMETHEUS_INTERNAL}
+      LAGO_API_URL: ${LAGO_API_INTERNAL}
+      LAGO_API_KEY: ${LAGO_ORG_API_KEY}
+      LAGO_PLAN_CODE: ${LAGO_PLAN_CODE}
+      LAGO_EMAIL_DOMAIN: ${LAGO_EMAIL_DOMAIN:-gpu.local}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
+      SYNC_MIN_DELTA: ${SYNC_MIN_DELTA:-0.000001}
+    volumes:
+      - billing_sync_state:/data
+    depends_on:
+      - prometheus
+      - lago-api
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/sync-ok || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 8. One-time provisioning helpers (idempotent):
+  #      make keycloak-init | grafana-init | lago-bootstrap   (--profile init)
+  # ─────────────────────────────────────────────────────────────────────────────
+  keycloak-init:
+    image: python:3.12-slim
+    profiles: ["init"]
+    container_name: keycloak-init
+    volumes:
+      - ./keycloak/init.py:/init.py:ro
+    environment:
+      KEYCLOAK_INTERNAL: ${KEYCLOAK_INTERNAL}
+      KEYCLOAK_URL: ${KEYCLOAK_URL}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      CODER_OIDC_CLIENT_SECRET: ${CODER_OIDC_CLIENT_SECRET}
+      GRAFANA_OIDC_CLIENT_SECRET: ${GRAFANA_OIDC_CLIENT_SECRET}
+      CODER_URL: ${CODER_URL}
+      GRAFANA_URL: ${GRAFANA_URL}
+      KEYCLOAK_DEMO_MIKE_PASSWORD: ${KEYCLOAK_DEMO_MIKE_PASSWORD:-mike123}
+      KEYCLOAK_DEMO_ANNA_PASSWORD: ${KEYCLOAK_DEMO_ANNA_PASSWORD:-anna123}
+    command: ["python", "/init.py"]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+  grafana-init:
+    image: python:3.12-slim
+    profiles: ["init"]
+    container_name: grafana-init
+    volumes:
+      - ./monitoring/grafana/init.py:/init.py:ro
+      - ./monitoring/grafana/dashboards:/dashboards:ro
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_ADMIN_USER: admin
+      GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    command: ["python", "/init.py"]
+    depends_on:
+      grafana:
+        condition: service_healthy
+
+  lago-bootstrap:
+    image: python:3.12-slim
+    profiles: ["init"]
+    container_name: lago-bootstrap
+    volumes:
+      - ./billing/lago/bootstrap.py:/bootstrap.py:ro
+    environment:
+      LAGO_API_INTERNAL: ${LAGO_API_INTERNAL}
+      LAGO_API_KEY: ${LAGO_ORG_API_KEY}
+      LAGO_CREATE_ORG: ${LAGO_CREATE_ORG:-false}
+      LAGO_ORG_USER_EMAIL: ${LAGO_ORG_USER_EMAIL:-}
+      LAGO_ORG_USER_PASSWORD: ${LAGO_ORG_USER_PASSWORD:-}
+      LAGO_ORG_NAME: ${LAGO_ORG_NAME:-}
+      LAGO_PLAN_CODE: ${LAGO_PLAN_CODE:-gpu-usage}
+      LAGO_PLAN_NAME: ${LAGO_PLAN_NAME:-GPU Usage}
+      LAGO_DEMO_USERS: ${LAGO_DEMO_USERS:-mike,anna}
+      LAGO_EMAIL_DOMAIN: ${LAGO_EMAIL_DOMAIN:-gpu.local}
+    command: ["python", "/bootstrap.py"]
+    depends_on:
+      lago-api:
+        condition: service_healthy

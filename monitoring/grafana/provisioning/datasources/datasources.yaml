@@ -1,0 +1,22 @@
+# Grafana file-based datasource provisioning
+# (loaded by Grafana at startup from /etc/grafana/provisioning/datasources)
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    readOnly: false
+    jsonData:
+      prometheusType: Prometheus
+      prometheusVersion: 2.x
+
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    readOnly: false
+    jsonData:
+      minVersion: 3.6.1

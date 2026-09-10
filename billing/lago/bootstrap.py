@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Idempotent Lago bootstrap for the GPU Rental platform.
+
+Creates (if missing):
+  * billable metrics   cpu_seconds, ram_gb_hours, network_gb, disk_write_gb
+  * a usage plan       (per_unit charges referencing the metrics)
+  * one customer + subscription per demo user (LAGO_DEMO_USERS)
+
+These are the targets of `billing-sync`, which pushes Prometheus deltas as
+metered events (POST /api/v1/events, `properties.value` = unit quantity).
+
+Run via: make lago-bootstrap   (docker compose --profile init run --rm lago-bootstrap)
+"""
+import os
+import time
+import urllib.error
+import urllib.request
+
+API = os.environ["LAGO_API_INTERNAL"].rstrip("/")
+API_KEY = os.environ.get("LAGO_API_KEY", "")
+PLAN_CODE = os.environ.get("LAGO_PLAN_CODE", "gpu-usage")
+PLAN_NAME = os.environ.get("LAGO_PLAN_NAME", "GPU Usage")
+DEMO_USERS = [u.strip() for u in os.environ.get("LAGO_DEMO_USERS", "mike,anna").split(",") if u.strip()]
+EMAIL_DOMAIN = os.environ.get("LAGO_EMAIL_DOMAIN", "gpu.local")
+
+# code -> (name, description, price-per-unit in USD)
+METRICS = {
+    "cpu_seconds":   ("CPU time (seconds)",           "Sum of container CPU-seconds consumed by workspaces.",  "0.000002"),
+    "ram_gb_hours":  ("RAM usage (GB.hours)",         "Average memory (GB) held for one hour.",               "0.000500"),
+    "network_gb":    ("Network traffic (GB)",         "Bytes transferred in/out, in GB.",                     "0.020000"),
+    "disk_write_gb": ("Disk writes (GB)",             "Bytes written by workspaces, in GB.",                  "0.001000"),
+}
+
+
+def http(method, path, data=None, timeout=15):
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
+    body = None
+    if data is not None:
+        import json
+        body = json.dumps(data).encode()
+    req = urllib.request.Request(f"{API}{path}", data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read() if e.fp else b""
+        import json
+        try:
+            return e.code, (json.loads(raw) if raw else None)
+        except json.JSONDecodeError:
+            return e.code, raw.decode(errors="replace")
+
+
+def wait_api():
+    for _ in range(120):
+        status, _ = http("GET", "/health", timeout=5)
+        if status == 200:
+            print("  lago api is ready")
+            return
+        time.sleep(5)
+    raise SystemExit("Lago API did not become ready in time")
+
+
+def check_key():
+    if not API_KEY:
+        raise SystemExit(
+            "LAGO_ORG_API_KEY is empty. Either set LAGO_CREATE_ORG=true + LAGO_ORG_* "
+            "in .env (auto-creates the org on first boot), or sign up at "
+            f"{os.environ.get('LAGO_UI_URL', 'http://localhost:8580')} and copy the "
+            "organisation API key from Developer → API keys into LAGO_ORG_API_KEY."
+        )
+    status, data = http("GET", "/api/v1/billable_metrics")
+    if status in (401, 403):
+        raise SystemExit(f"API key rejected (http {status}). Check LAGO_ORG_API_KEY.")
+    print("  api key OK")
+
+
+def ensure_billable_metrics():
+    _, data = http("GET", "/api/v1/billable_metrics?page=1&per_page=100")
+    existing = {m.get("code") for m in (data or {}).get("billable_metrics", [])}
+    for code, (name, desc, _price) in METRICS.items():
+        if code in existing:
+            print(f"  billable_metric '{code}' exists")
+            continue
+        payload = {
+            "billable_metric": {
+                "name": name,
+                "code": code,
+                "description": desc,
+                "aggregation_type": "sum",
+                "field_name": "value",
+                "properties": {},
+            }
+        }
+        status, resp = http("POST", "/api/v1/billable_metrics", payload)
+        if status in (200, 201):
+            print(f"  billable_metric '{code}' created (sum of properties.value)")
+        else:
+            print(f"  ! failed billable_metric '{code}' (http {status}): {resp}")
+
+
+def ensure_plan():
+    _, data = http("GET", f"/api/v1/plans?code={PLAN_CODE}")
+    if (data or {}).get("plans"):
+        print(f"  plan '{PLAN_CODE}' exists")
+        return
+    charges = [
+        {"billable_metric_code": code,
+         "charge_model": "per_unit",
+         "properties": {"amount": price}}
+        for code, (_n, _d, price) in METRICS.items()
+    ]
+    payload = {
+        "plan": {
+            "name": PLAN_NAME,
+            "code": PLAN_CODE,
+            "amount_cents": 0,
+            "interval": "monthly",
+            "pay_in_advance": False,
+            "charges": charges,
+        }
+    }
+    status, resp = http("POST", "/api/v1/plans", payload)
+    if status in (200, 201):
+        print(f"  plan '{PLAN_CODE}' created with {len(charges)} charges")
+    else:
+        raise SystemExit(f"could not create plan (http {status}): {resp}")
+
+
+def ensure_customer(external_id):
+    status, _ = http("GET", f"/api/v1/customers/{external_id}")
+    if status == 200:
+        print(f"  customer '{external_id}' exists")
+        return
+    payload = {
+        "customer": {
+            "external_id": external_id,
+            "name": external_id,
+            "email": f"{external_id}@{EMAIL_DOMAIN}",
+            "country": "US",
+            "currency": "USD",
+        }
+    }
+    status, resp = http("POST", "/api/v1/customers", payload)
+    if status in (200, 201):
+        print(f"  customer '{external_id}' created")
+    else:
+        print(f"  ! failed customer '{external_id}' (http {status}): {resp}")
+
+
+def ensure_subscription(external_id):
+    status, data = http("GET", f"/api/v1/subscriptions?external_customer_id={external_id}")
+    if status == 200 and (data or {}).get("subscriptions"):
+        print(f"  subscription for '{external_id}' exists")
+        return
+    payload = {
+        "subscription": {
+            "external_customer_id": external_id,
+            "plan_code": PLAN_CODE,
+            "name": PLAN_NAME,
+            "billing_time": "calendar",
+        }
+    }
+    status, resp = http("POST", "/api/v1/subscriptions", payload)
+    if status in (200, 201):
+        print(f"  subscription '{external_id}' → plan '{PLAN_CODE}' created")
+    else:
+        print(f"  ! failed subscription '{external_id}' (http {status}): {resp}")
+
+
+def main():
+    print("▶ Lago bootstrap")
+    wait_api()
+    check_key()
+    ensure_billable_metrics()
+    ensure_plan()
+    for username in DEMO_USERS:
+        ensure_customer(username)
+        ensure_subscription(username)
+    print("✔ Lago bootstrap done.")
+    print("  billing-sync will now send Prometheus usage deltas per user as metered events:")
+    print(f"    {', '.join(METRICS)}")
+
+
+if __name__ == "__main__":
+    main()
