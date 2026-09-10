@@ -45,7 +45,7 @@ USAGE = {
     "ram_gb_hours":  [("container_memory_usage_bytes",            False, 1e-9)],         # gauge: bytes → GB (window applied below)
     "network_gb":    [("container_network_receive_bytes_total",   True,  1e-9),          # counters → GB
                       ("container_network_transmit_bytes_total",  True,  1e-9)],
-    "disk_write_gb": [("container_fs_write_bytes_total",          True,  1e-9)],         # counter → GB
+    "disk_write_gb": [("container_fs_writes_bytes_total",         True,  1e-9)],         # counter → GB
 }
 
 
@@ -65,7 +65,11 @@ def http(method, url, data=None, header=None, timeout=20):
 
 
 def fetch_metric(metric):
-    """Return {container_name: latest_value} for a cAdvisor series."""
+    """Return {container_name: latest_value} for a cAdvisor series.
+
+    NB: instant-query responses carry `value: [ts, str]` (not `values` —
+    that shape only exists on range-query responses), so check `value`.
+    """
     out = {}
     params = urllib.parse.urlencode(
         {"query": f"{metric}{{container_label_coder_owner!=\"\"}}"})
@@ -74,8 +78,9 @@ def fetch_metric(metric):
         return out
     for row in data["data"]["result"]:
         name = row.get("metric", {}).get("name")
-        if name and row.get("values"):
-            out[name] = float(row["values"][-1][1])
+        value = row.get("value")
+        if name and value:
+            out[name] = float(value[1])
     return out
 
 
