@@ -1,25 +1,31 @@
 # Promtail — ships Docker container logs to Loki.
 #
-# Each log line of a Docker `json-file` container comes as JSON:
-#   {"log":"...","time":"...","stream":"stdout"}  (+ "tag" when the daemon sets
-#   log-opts tag, see README → "Logging": tag={{.Name}})
-#
-# The `json` parser turns each line into fields (log/time/stream/tag) and the
-# `container_name` label is promoted from the daemon's `tag` field, so Grafana
-# can filter per container, e.g. {container_name="coder-mike-gpu01"}.
+# Uses promtail's native `docker_sd` discovery: every container's json-file log
+# stream is tailed, the `docker:{}` pipeline stage unpacks the docker json
+# envelope ({log,stream,time}), and the container's name is promoted to the
+# `container_name` label so Grafana can filter per container,
+# e.g. {container_name="/coder-mike-gpu01"}.
 server:
   http_listen_port: 9080
   grpc_listen_port: 9081
 
+positions:
+  filename: /positions/positions.yaml
+
 clients:
   - url: http://loki:3100/loki/api/v1/push
-    label: primary
 
-sources:
-  - file:
-      - /var/lib/docker/containers/*/*-json.log
-    parsers:
-      - json: {}                     # parse each docker json line into fields
-    labels:
-      job: docker
-      container_name: '{{ .tag }}'   # promoted from the daemon's log-opts tag={{.Name}}
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # "/coder-mike-gpu01" -> "coder-mike-gpu01"
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container_name
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: stream
+    pipeline_stages:
+      - docker: {}

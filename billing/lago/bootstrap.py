@@ -11,6 +11,7 @@ metered events (POST /api/v1/events, `properties.value` = unit quantity).
 
 Run via: make lago-bootstrap   (docker compose --profile init run --rm lago-bootstrap)
 """
+import json
 import os
 import time
 import urllib.error
@@ -36,10 +37,7 @@ def http(method, path, data=None, timeout=15):
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
-    body = None
-    if data is not None:
-        import json
-        body = json.dumps(data).encode()
+    body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(f"{API}{path}", data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -47,7 +45,6 @@ def http(method, path, data=None, timeout=15):
             return resp.status, (json.loads(raw) if raw else None)
     except urllib.error.HTTPError as e:
         raw = e.read() if e.fp else b""
-        import json
         try:
             return e.code, (json.loads(raw) if raw else None)
         except json.JSONDecodeError:
@@ -90,7 +87,8 @@ def ensure_billable_metrics():
                 "name": name,
                 "code": code,
                 "description": desc,
-                "aggregation_type": "sum",
+                # NOTE: Lago >= v1.x uses *_agg enum names ("sum", "max"… are invalid)
+                "aggregation_type": "sum_agg",
                 "field_name": "value",
                 "properties": {},
             }
@@ -107,17 +105,29 @@ def ensure_plan():
     if (data or {}).get("plans"):
         print(f"  plan '{PLAN_CODE}' exists")
         return
-    charges = [
-        {"billable_metric_code": code,
-         "charge_model": "per_unit",
-         "properties": {"amount": price}}
-        for code, (_n, _d, price) in METRICS.items()
-    ]
+    # Newer Lago APIs require charges to reference the billable metric by its
+    # UUID (billable_metric_id); billable_metric_code alone is no longer
+    # resolved and yields a 404 billable_metric_not_found.
+    _, metrics = http("GET", "/api/v1/billable_metrics?page=1&per_page=100")
+    metric_ids = {m.get("code"): m.get("lago_id") or m.get("id")
+                  for m in (metrics or {}).get("billable_metrics", [])}
+    charges = []
+    for code, (_n, _d, price) in METRICS.items():
+        mid = metric_ids.get(code)
+        if not mid:
+            raise SystemExit(f"billable metric '{code}' not found — cannot create plan")
+        charges.append({"billable_metric_id": mid,
+                        "billable_metric_code": code,
+                        # NOTE: 'per_unit' was removed; 'standard' charges a
+                        # fixed amount per event unit, which is the same model.
+                        "charge_model": "standard",
+                        "properties": {"amount": price}})
     payload = {
         "plan": {
             "name": PLAN_NAME,
             "code": PLAN_CODE,
             "amount_cents": 0,
+            "amount_currency": "USD",
             "interval": "monthly",
             "pay_in_advance": False,
             "charges": charges,
@@ -159,6 +169,8 @@ def ensure_subscription(external_id):
     payload = {
         "subscription": {
             "external_customer_id": external_id,
+            # external_id is mandatory in newer Lago APIs
+            "external_id": external_id,
             "plan_code": PLAN_CODE,
             "name": PLAN_NAME,
             "billing_time": "calendar",

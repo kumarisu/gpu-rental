@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-RUN useradd -r -u 2000 sync && mkdir -p /data && chown sync /data
+RUN groupadd -g 2000 billing && useradd -r -u 2000 -g billing billing-sync && mkdir -p /data && chown billing-sync /data
 WORKDIR /app
 COPY sync.py /app/sync.py
-USER sync
+USER billing-sync
 CMD ["python", "-u", "/app/sync.py"]

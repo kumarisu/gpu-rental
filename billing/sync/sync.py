@@ -210,11 +210,22 @@ def send_events(state, owners):
                 print(f"  ! event rejected {owner}:{code} (http {status}): {resp}")
 
 
+def prometheus_ok():
+    """True when Prometheus answers — used for the container healthcheck."""
+    try:
+        # NB: /-/healthy answers plain text, so don't reuse the JSON http() helper.
+        with urllib.request.urlopen(f"{PROMETHEUS}/-/healthy", timeout=10) as resp:
+            return resp.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def one_cycle(state):
     containers = fetch_containers()
     if not containers:
         print("  no running workspace containers (yet)")
-        return False
+        # Healthy = the pipeline is reachable, even with zero workspaces.
+        return prometheus_ok()
     print(f"  workspaces: {len(containers)} → {containers}")
     owners = collect(state, containers)
     if owners:

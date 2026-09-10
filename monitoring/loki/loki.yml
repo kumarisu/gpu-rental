@@ -1,25 +1,41 @@
 # Loki (3.6.x) — log store for the GPU Rental platform
-# Uses the modern nested config schema introduced in Loki 3.x.
+# Config schema for Loki 3.x (boltdb-shipper + filesystem storage).
 auth_enabled: false
 
 server:
   http_listen_port: 3100
   grpc_listen_port: 9099
-  enable_k8s_lifecycle: false
 
 common:
-  data_dir: /loki/data
+  path_prefix: /loki
   storage:
     filesystem:
-      data_directory: /loki/data
-    wal:
-      wal_directory: /loki/wal
-  # Data retention: Loki 3.x manages retention via the classic settings
-  # (e.g. `compactor.retention.period` / `limits`), or via the storage/object
-  # lifecycle for object stores. Leave unset here to keep defaults.
+      chunks_directory: /loki/data/chunks
+      rules_directory: /loki/data/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
 
 ingester:
   wal:
-    enabled: true
+    dir: /loki/wal
 
-wm_encoder_compat: false
+limits_config:
+  retention_period: 672h
+
+compactor:
+  working_directory: /loki/data/retention
+  retention_enabled: true
+  # Required by Loki 3.x when retention is enabled
+  delete_request_store: filesystem

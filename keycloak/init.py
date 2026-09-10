@@ -74,15 +74,42 @@ def admin_token():
         raise SystemExit(f"Admin login failed (KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD?): {exc}")
 
 
+def ensure_realm_http(token, realm_name):
+    """Force sslRequired='none' on an existing realm.
+
+    Needed for the dev stack (plain HTTP behind a docker port-publish):
+    requests arriving over the published port are seen as "external" remote
+    addresses, so realms left at the default sslRequired='external' reject
+    browser logins with "HTTPS required". This also covers the built-in
+    'master' realm so the admin console is reachable.
+    """
+    code, realm = http("GET", f"{KC}/admin/realms/{realm_name}", token=token)
+    if code != 200 or not isinstance(realm, dict):
+        print(f"  ! cannot read realm '{realm_name}' (http {code})")
+        return
+    if realm.get("sslRequired") == "none":
+        return
+    realm["sslRequired"] = "none"
+    code, _ = http("PUT", f"{KC}/admin/realms/{realm_name}", data=realm, token=token)
+    if code in (200, 201, 204):
+        print(f"  realm '{realm_name}' sslRequired set to 'none'")
+    else:
+        print(f"  ! could not update realm '{realm_name}' sslRequired (http {code})")
+
+
 def create_realm(token):
     status, _ = http("GET", f"{KC}/admin/realms/{REALM}", token=token)
     if status == 200:
         print(f"  realm '{REALM}' already exists")
+        # Migrate older realms created with sslRequired=external — this stack
+        # terminates TLS outside Keycloak (plain HTTP inside the network).
+        ensure_realm_http(token, REALM)
         return
     payload = {
         "realm": REALM,
         "enabled": True,
-        "sslRequired": "external",
+        # Dev stack: plain HTTP behind a docker port-publish, no TLS terminator.
+        "sslRequired": "none",
         "registrationAllowed": False,
         "registrationEmailAsUsername": True,
         "loginWithEmailAllowed": True,
@@ -144,6 +171,10 @@ def create_user(token, username, password, first, last):
     code, _ = http("POST", f"{KC}/admin/realms/{REALM}/users", data=payload, token=token)
     if code in (201, 200):
         print(f"  user '{username}' created ({email})")
+    elif code == 409:
+        # The username/exact search above can miss the user (e.g. email-linked
+        # duplicates) while the create conflicts — treat as already provisioned.
+        print(f"  user '{username}' already exists (http 409)")
     else:
         raise SystemExit(f"could not create user '{username}' (http {code})")
 
@@ -156,6 +187,9 @@ def main():
     print(f"  public realm:  {KC_PUBLIC}/realms/{REALM}")
     print(f"  internal realm:{KC}/realms/{REALM}")
     create_realm(token)
+    # The built-in 'master' realm (admin console) also defaults to
+    # sslRequired=external, which blocks browser access over HTTP.
+    ensure_realm_http(token, "master")
 
     create_client(
         token, "coder", CODER_SECRET,
