@@ -148,7 +148,9 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
-    # Linux: add the host `docker` group so the socket is usable.
+    # Supplementary group that owns /var/run/docker.sock inside the container:
+    #   macOS (Docker Desktop) -> 0 (the socket is root:root in the VM)
+    #   Linux -> host `docker` group GID (getent group docker | cut -d: -f3)
     group_add: ["${DOCKER_GROUP_GID:-120}"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
