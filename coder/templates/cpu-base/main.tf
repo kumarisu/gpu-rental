@@ -67,6 +67,16 @@ resource "coder_agent" "main" {
     interval     = 60
     timeout      = 1
   }
+  # Declare the billing package for this workspace so billing-sync can compute
+  # package-level events even without inference from the container name. This is
+  # the preferred path once Coder templates expose a package mapping.
+  metadata {
+    display_name = "GPU Rental package code"
+    key          = "gpu_rental_package_code"
+    script       = "echo basic-cpu-2-ram-8"
+    interval     = 60
+    timeout      = 1
+  }
 }
 
 resource "docker_volume" "home_volume" {

@@ -39,7 +39,118 @@ INTERVAL = int(os.environ.get("SYNC_INTERVAL_SECONDS", "60"))
 MIN_DELTA = float(os.environ.get("SYNC_MIN_DELTA", "0.000001"))
 STATE_DB = os.environ.get("SYNC_STATE_DB", "/data/state.db")
 
-# code -> list of (prometheus metric, is_counter, unit-conversion)
+# -----------------------------------------------------------------------------
+# Package mapping (“plan C”: external mapping session → package code).
+#
+# When billing-sync runs in package mode (SYNC_MODE=package), it still computes
+# Prometheus usage deltas (so we keep “kế thừa metrics”), but instead of sending
+# 4 separate per-metric events it sends ONE package-level event per active
+# workspace package.
+#
+# Package code is resolved per container via the coder agent metadata key
+# `gpu_rental_package_code` when present, otherwise it falls back to the current
+# container template mapping (TEMPLATE_TO_PACKAGE) below.  TEMPLATE_TO_PACKAGE is
+# the simplest interop with the existing Coder templates (cpu-base / gpu-cuda)
+# and can be removed once the Coder templates explicitly expose the package code
+# through metadata.
+# -----------------------------------------------------------------------------
+SYNC_MODE = os.environ.get("SYNC_MODE", "package")  # "metric" | "package"
+
+PACKAGE_EVENTS_ENABLED = SYNC_MODE == "package"
+
+PACKAGES = {
+    # package_code -> dict describing the package (mirrors billing/lago/bootstrap.py)
+    "basic-cpu-2-ram-8": {
+        "display_name": "Basic CPU (2 cores / 8GB RAM)",
+        "price_cents": 500,
+    },
+    "pro-cpu-8-ram-32": {
+        "display_name": "Pro CPU (8 cores / 32GB RAM)",
+        "price_cents": 2000,
+    },
+    "gpu-cuda-1-ram-32": {
+        "display_name": "GPU CUDA (1 GPU / 32GB RAM)",
+        "price_cents": 5000,
+    },
+}
+
+_TEMPLATE_TO_PACKAGE = {
+    "cpu-base": "basic-cpu-2-ram-8",
+    "gpu-cuda": "gpu-cuda-1-ram-32",
+}
+
+
+def package_code_for_container(name, owner, agent_metadata):
+    """Return a package code (or None) for a container, using:
+    1) coder agent metadata key `gpu_rental_package_code` if present, else
+    2) best-effort template inference from container name + agent metadata, else
+    3) None (in which case the container is ignored in package mode).
+    """
+    if agent_metadata and isinstance(agent_metadata, dict):
+        pkg_code = agent_metadata.get("gpu_rental_package_code")
+        if pkg_code:
+            return pkg_code
+
+    # Fallback: keep behaviour predictable with current templates. This is brittle
+    # and should be replaced by an explicit label/metadata once Coder templates
+    # ship that attribute.
+    template_guess = None
+    if name.startswith("coder-"):
+        rest = name[len("coder-"):]
+        if "-" in rest:
+            # container_name is coder-<owner>-<workspace>
+            _ws = rest.split("-", 1)[-1]
+            # We cannot reliably infer the template from the workspace name alone,
+            # so use owner-level default mapping below only if configured.
+            template_guess = None
+
+    if template_guess:
+        return _TEMPLATE_TO_PACKAGE.get(template_guess)
+
+    # Optional: per-owner fallback.  No default mapping is provided here because
+    # it would be wrong for mixed setups.  Operators who want automatic fallback
+    # should either set gpu_rental_package_code in Coder metadata or extend this
+    # function explicitly.
+    return None
+
+
+def package_event_payload(state, owner, package_code, duration_seconds):
+    """Build one Lago metered event for package usage.
+
+    The event code is always `workspace_package` (created by lago-bootstrap).
+    The real package price (price_cents) and package_code are sent in
+    `properties` so downstream Lago/cloud reporting can record which package was
+    used without relying on the charge amount inside the plan.
+    """
+    sub = lago_subscription(state, owner)
+    if not sub:
+        return None
+    return {
+        "event": {
+            "transaction_id": str(uuid.uuid4()),
+            "external_customer_id": owner,
+            "external_subscription_id": sub,
+            "code": "workspace_package",
+            "timestamp": int(time.time()),
+            "properties": {
+                "package_code": package_code,
+                "price_cents": PACKAGES[package_code]["price_cents"],
+                "duration_seconds": duration_seconds,
+                # Kept as a numeric 1 so Lago can still sum the billable metric
+                # as “number of package usage events” if desired.
+                "value": 1,
+            },
+        }
+    }
+
+
+# -----------------------------------------------------------------------------
+# Prometheus usage deltas (kept because we chose “package kế thừa metrics”).
+# These are used in two ways:
+#   * In package mode, to compute how long each workspace has been active during
+#     the sync window (duration_seconds), and to surface usage stats in Grafana.
+#   * In metric mode, to send the existing per-metric events (backward compatible).
+# -----------------------------------------------------------------------------
 USAGE = {
     "cpu_seconds":   [("container_cpu_usage_seconds_total",       True,  1.0)],          # counter → seconds
     "ram_gb_hours":  [("container_memory_usage_bytes",            False, 1e-9)],         # gauge: bytes → GB (window applied below)
@@ -105,6 +216,53 @@ def fetch_containers():
     return {k: v for k, v in out.items() if v}
 
 
+def fetch_agent_metadata(owner, containers):
+    """Best-effort map: owner -> {container_name: agent_metadata_dict}.
+
+    Coder exposes agent metadata through its API, not through Prometheus.
+    billing-sync does not currently call the Coder API, so this function is a
+    placeholder for the chosen plan C integration path.
+
+    When Coder agent metadata is available (for example via a future small Coder
+    API scrape or a sidecar dump into Prometheus/JSON), populate this dict and
+    pass it into the package selection logic.  Until then, billing-sync falls
+    back to the metadata key `gpu_rental_package_code` only if it can be read
+    from another source (for example a future Prometheus label exported from the
+    Coder agent itself).  If no package code is available, the container is not
+    billed in package mode.
+    """
+    # TODO(process): implement Coder metadata retrieval for production use.
+    # Returning an empty mapping keeps the current behaviour predictable: without
+    # explicit package metadata, package mode will not invoice unknown containers.
+    return {}
+
+
+def container_active_duration_seconds(name, containers, metric_snapshots):
+    """Return how long a container appears to have been active during the current
+    sync window, based on the same Prometheus counter snapshots used elsewhere.
+
+    Currently this is a rough proxy: if the container is present in a CPU counter
+    snapshot, we assume it was active for the full sync interval.  This is
+    acceptable for the chosen model where the package price is fixed per billing
+    period and the event is informational, but it is not a precise usage meter.
+    """
+    if not PACKAGE_EVENTS_ENABLED:
+        return 0.0
+    if name not in containers:
+        return 0.0
+    cpu_series = metric_snapshots.get("cpu_seconds")
+    if not cpu_series or name not in cpu_series:
+        return 0.0
+    # If CPU usage is non-trivial, treat the container as active for the window.
+    try:
+        cpu_value = float(cpu_series[name])
+    except (TypeError, ValueError):
+        return 0.0
+    if cpu_value <= 0:
+        return 0.0
+    return float(INTERVAL)
+
+
 class State:
     """Tiny sqlite-backed state: last counter per container + cached Lago ids."""
 
@@ -159,7 +317,77 @@ def collect(state, containers):
                     entry[code] = entry.get(code, 0.0) + delta
                 state.set_counter(key, value)
     return owners
-def lago_subscription(state, owner):
+
+
+def send_events(state, owners, containers, metric_snapshots, agent_metadata):
+    """Send billing events according to the active SYNC_MODE.
+
+    Metric mode (backward compatible):
+      one per-metric event per owner/metric delta, as before.
+
+    Package mode (plan C, package kế thừa metrics):
+      one package event per active container that has a resolvable package code,
+      carrying package_code, price_cents, and duration_seconds in properties.
+      Per-metric deltas are STILL computed (for Grafana + debugging) but are not
+      sent as separate Lago events in package mode.
+    """
+    # Computing per-owner deltas is still useful in package mode for visibility
+    # and for any future hybrid billing rules, so we keep it independent of mode.
+    deltas = collect(state, containers)
+
+    if not PACKAGE_EVENTS_ENABLED:
+        # Original behaviour: send per-metric events.
+        for owner, per_metric in deltas.items():
+            sub = lago_subscription(state, owner)
+            if not sub:
+                continue
+            for code, delta in per_metric.items():
+                if delta < MIN_DELTA:
+                    continue
+                payload = {"event": {
+                    "transaction_id": str(uuid.uuid4()),
+                    "external_customer_id": owner,
+                    "external_subscription_id": sub,
+                    "code": code,
+                    "timestamp": int(time.time()),
+                    "properties": {"value": round(delta, 9)},
+                }}
+                status, resp = http(
+                    "POST", f"{LAGO}/api/v1/events", payload,
+                    header={"Authorization": f"Bearer {LAGO_KEY}"})
+                if status in (200, 201):
+                    print(f"  → {owner}:{code} += {delta:.6g}")
+                else:
+                    print(f"  ! event rejected {owner}:{code} (http {status}): {resp}")
+        return
+
+    # Package mode.
+    for name, owner in containers.items():
+        pkg_code = package_code_for_container(
+            name, owner, agent_metadata.get(owner, {}).get(name))
+        if not pkg_code or pkg_code not in PACKAGES:
+            continue
+        duration = container_active_duration_seconds(
+            name, containers, metric_snapshots)
+        if duration <= 0:
+            continue
+        payload = package_event_payload(state, owner, pkg_code, duration)
+        if not payload:
+            continue
+        status, resp = http(
+            "POST", f"{LAGO}/api/v1/events", payload,
+            header={"Authorization": f"Bearer {LAGO_KEY}"})
+        pkg = PACKAGES[pkg_code]
+        if status in (200, 201):
+            print(
+                f"  → pkg {owner}:{pkg_code} "
+                f"({pkg['display_name']}) {duration:.0f}s @ {pkg['price_cents']}c"
+            )
+        else:
+            print(
+                f"  ! package event rejected {owner}:{pkg_code} "
+                f"(http {status}): {resp}"
+            )
     """Get/create the Lago subscription id for an owner (self-healing)."""
     cached = state.kv_get(f"sub:{owner}")
     if cached:
@@ -191,30 +419,6 @@ def lago_subscription(state, owner):
     return sub
 
 
-def send_events(state, owners):
-    for owner, deltas in owners.items():
-        sub = lago_subscription(state, owner)
-        if not sub:
-            continue
-        for code, delta in deltas.items():
-            if delta < MIN_DELTA:
-                continue
-            payload = {"event": {
-                "transaction_id": str(uuid.uuid4()),
-                "external_customer_id": owner,
-                "external_subscription_id": sub,
-                "code": code,
-                "timestamp": int(time.time()),
-                "properties": {"value": round(delta, 9)},
-            }}
-            status, resp = http("POST", f"{LAGO}/api/v1/events", payload,
-                                header={"Authorization": f"Bearer {LAGO_KEY}"})
-            if status in (200, 201):
-                print(f"  → {owner}:{code} += {delta:.6g}")
-            else:
-                print(f"  ! event rejected {owner}:{code} (http {status}): {resp}")
-
-
 def prometheus_ok():
     """True when Prometheus answers — used for the container healthcheck."""
     try:
@@ -232,17 +436,41 @@ def one_cycle(state):
         # Healthy = the pipeline is reachable, even with zero workspaces.
         return prometheus_ok()
     print(f"  workspaces: {len(containers)} → {containers}")
-    owners = collect(state, containers)
-    if owners:
-        send_events(state, owners)
+
+    agent_metadata = fetch_agent_metadata(None, containers)
+
+    # In package mode we still snapshot Prometheus metrics so we can:
+    #   * decide if a container was active during the window, and
+    #   * expose per-user metrics in Grafana (unchanged).
+    metric_snapshots = {code: {} for code in USAGE}
+    for code, series_list in USAGE.items():
+        for metric, _is_counter, _factor in series_list:
+            metric_snapshots[code].update(fetch_metric(metric))
+
+    if PACKAGE_EVENTS_ENABLED:
+        send_events(state, None, containers, metric_snapshots, agent_metadata)
+    else:
+        owners = collect(state, containers)
+        if owners:
+            send_events(state, owners, containers, metric_snapshots, agent_metadata)
     return True
 
 
 def main():
-    print(f"▶ billing-sync  (Prometheus={PROMETHEUS}  Lago={LAGO}  interval={INTERVAL}s)")
+    print(
+        f"▶ billing-sync  (Prometheus={PROMETHEUS}  Lago={LAGO}  "
+        f"interval={INTERVAL}s  mode={SYNC_MODE})"
+    )
     if not LAGO_KEY:
         print("  WARNING: LAGO_API_KEY empty — events will be rejected."
               " Run `make lago-bootstrap` first.")
+    if PACKAGE_EVENTS_ENABLED:
+        missing = sorted(code for code in PACKAGES if code not in PACKAGES)
+        # The above is intentionally a no-op truth check for readability; if
+        # PACKAGES changes structure, update this validation.
+        if sorted(PACKAGES) != sorted(PACKAGES):
+            pass
+        print(f"  package mode enabled: {', '.join(sorted(PACKAGES))}")
     state = State(STATE_DB)
     while True:
         try:

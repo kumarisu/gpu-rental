@@ -24,12 +24,33 @@ PLAN_NAME = os.environ.get("LAGO_PLAN_NAME", "GPU Usage")
 DEMO_USERS = [u.strip() for u in os.environ.get("LAGO_DEMO_USERS", "mike,anna").split(",") if u.strip()]
 EMAIL_DOMAIN = os.environ.get("LAGO_EMAIL_DOMAIN", "gpu.local")
 
-# code -> (name, description, price-per-unit in USD)
+# -----------------------------------------------------------------------------
+# Per-metric prices (kept for backwards compatibility / debugging / Grafana)
+# -----------------------------------------------------------------------------
 METRICS = {
     "cpu_seconds":   ("CPU time (seconds)",           "Sum of container CPU-seconds consumed by workspaces.",  "0.000002"),
     "ram_gb_hours":  ("RAM usage (GB.hours)",         "Average memory (GB) held for one hour.",               "0.000500"),
     "network_gb":    ("Network traffic (GB)",         "Bytes transferred in/out, in GB.",                     "0.020000"),
     "disk_write_gb": ("Disk writes (GB)",             "Bytes written by workspaces, in GB.",                  "0.001000"),
+}
+
+
+# -----------------------------------------------------------------------------
+# Package definitions.
+#
+# Key       -> billable metric code used by billing-sync when it sends a package
+#               event (event "code").
+# display   -> human-readable package name used in logs / Grafana.
+# price_cents -> flat price for the package (USD cents). In this bootstrap we
+#               create a plan charge for the package metric but keep its amount
+#               at 0; billing-sync sends the real price in the event properties
+#               so pricing can change without re-running bootstrap.
+# -----------------------------------------------------------------------------
+PACKAGES = {
+    # package code -> (display_name, price_cents)
+    "basic-cpu-2-ram-8":  ("Basic CPU (2 cores / 8GB RAM)",  500),
+    "pro-cpu-8-ram-32":   ("Pro CPU (8 cores / 32GB RAM)",   2000),
+    "gpu-cuda-1-ram-32":  ("GPU CUDA (1 GPU / 32GB RAM)",    5000),
 }
 
 
@@ -99,6 +120,33 @@ def ensure_billable_metrics():
         else:
             print(f"  ! failed billable_metric '{code}' (http {status}): {resp}")
 
+    # Package-level billable metric (workspace_package).
+    pkg_metric_code = "workspace_package"
+    if pkg_metric_code in existing:
+        print(f"  billable_metric '{pkg_metric_code}' exists")
+    else:
+        pkg_payload = {
+            "billable_metric": {
+                "code": pkg_metric_code,
+                "name": "Workspace package usage",
+                "description": (
+                    "Package-level usage events sent by billing-sync. "
+                    "Event properties may include package_code, price_cents, "
+                    "duration_seconds."
+                ),
+                "aggregation_type": "sum_agg",
+                "field_name": "value",
+                "properties": {},
+            }
+        }
+        status, resp = http("POST", "/api/v1/billable_metrics", pkg_payload)
+        if status in (200, 201):
+            print(f"  billable_metric '{pkg_metric_code}' created")
+        else:
+            print(
+                f"  ! failed billable_metric '{pkg_metric_code}' (http {status}): {resp}"
+            )
+
 
 def ensure_plan():
     _, data = http("GET", f"/api/v1/plans?code={PLAN_CODE}")
@@ -122,6 +170,20 @@ def ensure_plan():
                         # fixed amount per event unit, which is the same model.
                         "charge_model": "standard",
                         "properties": {"amount": price}})
+
+    # Package-level charge referencing workspace_package.
+    # Amount is set to 0 here intentionally because billing-sync sends the real
+    # package price inside the event properties (price_cents). This keeps the
+    # plan definition generic across packages and avoids rerunning bootstrap when
+    # package prices change. If you prefer Lago to interpret prices directly,
+    # replace this with per-package charges computed from PACKAGES below.
+    pkg_mid = metric_ids.get("workspace_package")
+    if pkg_mid:
+        charges.append({"billable_metric_id": pkg_mid,
+                        "billable_metric_code": "workspace_package",
+                        "charge_model": "standard",
+                        "properties": {"amount": "0"}})
+
     payload = {
         "plan": {
             "name": PLAN_NAME,
@@ -193,8 +255,10 @@ def main():
         ensure_customer(username)
         ensure_subscription(username)
     print("✔ Lago bootstrap done.")
-    print("  billing-sync will now send Prometheus usage deltas per user as metered events:")
-    print(f"    {', '.join(METRICS)}")
+    print("  billing-sync can now send:")
+    print(f"    per-metric events: {', '.join(METRICS)}")
+    print(f"    package events   : {', '.join(sorted(PACKAGES))}")
+    print("  (see billing/sync/sync.py for the active event mode + package mapping)")
 
 
 if __name__ == "__main__":

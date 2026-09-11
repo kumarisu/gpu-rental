@@ -86,6 +86,15 @@ resource "coder_agent" "main" {
     interval     = 60
     timeout      = 1
   }
+  # Declare the billing package for this workspace. Matches the GPU CUDA package
+  # defined in billing/lago/bootstrap.py and billing/sync/sync.py.
+  metadata {
+    display_name = "GPU Rental package code"
+    key          = "gpu_rental_package_code"
+    script       = "echo gpu-cuda-1-ram-32"
+    interval     = 60
+    timeout      = 1
+  }
 }
 
 resource "docker_volume" "home_volume" {
