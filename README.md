@@ -293,3 +293,41 @@ the promtail config keys map 1:1 to Alloy's `docker_containers` source.)*
 - `billing-sync` replays deltas after a crash using its sqlite state — keep `./data` backed up.
   utilization + per-container GPU memory attribution in Prometheus/Grafana and, if desired,
   a `gpu_seconds` billable metric.
+
+
+
+# Additional infos:
+## Cơ chế đúng theo dữ liệu thực hệ thống
+
+### 1. Metrics (cAdvisor + Prometheus)
+- **Không cần cài agent trong từng container** — cAdvisor chỉ cần chạy 1 copy trên host (docker-compose service `cadvisor`), mount `/var/run/docker.sock`.
+- Lúc tạo container mới (Coder `docker run`), container tự động mang labels do Coder gán (`coder.owner`, `coder.workspace_id`, v.v.) — cAdvisor đọc từ Docker API và đẩy vào metrics series với labels đó.
+- Prometheus scrape cAdvisor mỗi 5s → series mới của container đó xuất hiện tự nhiên trong Prometheus.
+- **Tạo container là hết — không cần thêm cấu hình nào trong container đó**.
+
+### 2. Logs (Promtail + Loki)
+- Promtail chạy trên host, mount:
+  - `/var/run/docker.sock` ( để discovery container qua `docker_sd_configs` ),
+  - `/var/lib/docker/containers/*` ( để đọc file log JSON của từng container ).
+- Docker daemon ghi log theo `json-file` driver — file log tự tạo ra trong host path khi container start. Promtail tự phát hiện container mới (refresh 5s) → tail file → gửi sang Loki với label `container_name`.
+- **Tương tự: không cần cài log agent trong container — chỉ cần Docker daemon log driver là `json-file`**.
+
+### Lý do kỹ thuật
+- Host-level monitoring agent (cAdvisor, node-exporter, promtail, telemetry-sdk...) chỉ cần quyền đọc Docker API / đọc file log host — không cần sidecar/nhúng agent vào container guest. Container guest bất kỳ (ubuntu, python, CUDA) vẫn chỉ là workload, không cần biết đang bị đo.
+- Ưu điểm: giảm overhead trong container, tập trung cấu hình ở host, container guest giữ minimal.
+
+### Kiểm tra nhanh trong hệ thống của bạn
+1. Tạo 1 workspace mới → container `coder-<user>-<ws>` xuất hiện:
+   - Metrics: Prometheus 표면 `container_cpu_usage_seconds_total{container_label_coder_owner="..."}` mới → Grafana thấy.
+   - Logs: Promtail discovery container mới → Loki có log `{container_name="coder-..."}`.
+2. Đều không cần làm gì thêm trong container đó.
+
+## Nếu bạn quay về dùng "sidecar / agent trong container" thì khác biệt ra sao (tùy chọn, không dùng trong hệ thống này)
+- Sidecar: chạy 1 container nữa bên cạnh app container, chia sẻ network namespace — thu metrics/log từ app container đó. Phức tạp hơn, overhead cao hơn, nhưng đôi khi cần nếu host-agent không tiếp cận được (ví dụ môi trường managed K8s hạn chế mount socket).
+- Host-agent (hệ thống này): simple hơn, đủ cho Docker Compose single-host dev.
+
+## Lưu ý nhỏ cho production
+- Host-agent cần quyền đọt Docker socket / log dir — cần bảo mật socket (`DOCKER_GROUP_GID`, restriction access) vì bất kỳ container nào có thể mount socket và ra quyền root host.
+- Log driver `json-file` mặc định không rotate → cần `log-opt max-size`, `max-file` nếu nhiều container, để tránh full disk.
+
+Tóm: **bạn hiểu đúng — tạo container mới không cần setup thêm agent trong container; chỉ cần host-agent (cAdvisor + Promtail) đã chạy sẵn, container mới tự bị đo/logging vì Docker expose thông tin đó ra host.**
