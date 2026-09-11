@@ -47,12 +47,15 @@ STATE_DB = os.environ.get("SYNC_STATE_DB", "/data/state.db")
 # 4 separate per-metric events it sends ONE package-level event per active
 # workspace package.
 #
-# The package code is resolved per container from the Docker label
-# `gpu_rental_package` (declared in the Coder templates cpu-base / gpu-cuda),
-# which cAdvisor exposes to Prometheus as `container_label_gpu_rental_package`
-# and which fetch_containers() reads via fetch_metric_with_labels(). The coder
-# agent metadata key `gpu_rental_package_code` is a secondary source for
-# operators who prefer to override the package at runtime.
+# The package code is resolved per container, in priority order:
+#   1) the Docker label `gpu_rental_package` (declared in the Coder templates
+#      cpu-base / gpu-cuda), which cAdvisor exposes to Prometheus as
+#      `container_label_gpu_rental_package` and which fetch_containers() reads
+#      via fetch_metric_with_labels();
+#   2) the coder agent metadata key `gpu_rental_package_code` (runtime override);
+#   3) the operator-provided external mapping PACKAGE_BY_OWNER
+#      ("owner=package_code,owner2=package_code2") — handy for demos where the
+#      container label is not (yet) present.
 # -----------------------------------------------------------------------------
 SYNC_MODE = os.environ.get("SYNC_MODE", "package")  # "metric" | "package"
 
@@ -74,13 +77,25 @@ PACKAGES = {
     },
 }
 
+# External per-owner package mapping (plan C, demo-friendly fallback source).
+# Format: comma-separated "owner=package_code" pairs, e.g.
+#   PACKAGE_BY_OWNER=mike=gpu-cuda-1-ram-32,anna=basic-cpu-2-ram-8
+_PACKAGE_BY_OWNER = {}
+for _pair in os.environ.get("PACKAGE_BY_OWNER", "").split(","):
+    _pair = _pair.strip()
+    if "=" in _pair:
+        _owner, _code = (p.strip() for p in _pair.split("=", 1))
+        if _owner and _code:
+            _PACKAGE_BY_OWNER[_owner] = _code
+
 
 def package_code_for_container(name, owner, agent_metadata=None, container_info=None):
-    """Return a package code (or None) for a container, using:
+    """Return a package code (or None) for a container, using (in priority):
     1) Prometheus container label `gpu_rental_package` (from Coder template
-       docker labels, exposed by cAdvisor), else
-    2) coder agent metadata key `gpu_rental_package_code` if present, else
-    3) None (in which case the container is ignored in package mode).
+       docker labels, exposed by cAdvisor),
+    2) coder agent metadata key `gpu_rental_package_code` if present,
+    3) the operator mapping PACKAGE_BY_OWNER (owner -> package code),
+    4) None (in which case the container is ignored in package mode).
     """
     if container_info and isinstance(container_info, dict):
         pkg_code = (container_info.get("package") or "").strip()
@@ -91,6 +106,9 @@ def package_code_for_container(name, owner, agent_metadata=None, container_info=
         pkg_code = (agent_metadata.get("gpu_rental_package_code") or "").strip()
         if pkg_code:
             return pkg_code
+
+    if owner and owner in _PACKAGE_BY_OWNER:
+        return _PACKAGE_BY_OWNER[owner]
 
     return None
 

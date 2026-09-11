@@ -459,6 +459,10 @@ services:
       #               price model — the default).
       # "metric"   → legacy per-metric events (cpu_seconds, ram_gb_hours, …).
       SYNC_MODE: ${SYNC_MODE:-package}
+      # Optional plan-C mapping owner -> package (comma separated):
+      #   PACKAGE_BY_OWNER=mike=gpu-cuda-1-ram-32,anna=basic-cpu-2-ram-8
+      # Used as fallback when the container label is absent (demos).
+      PACKAGE_BY_OWNER: ${PACKAGE_BY_OWNER:-}
     volumes:
       - billing_sync_state:/data
     depends_on:
