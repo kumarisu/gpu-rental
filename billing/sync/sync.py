@@ -80,37 +80,23 @@ _TEMPLATE_TO_PACKAGE = {
 }
 
 
-def package_code_for_container(name, owner, agent_metadata):
+def package_code_for_container(name, owner, agent_metadata=None, container_info=None):
     """Return a package code (or None) for a container, using:
-    1) coder agent metadata key `gpu_rental_package_code` if present, else
-    2) best-effort template inference from container name + agent metadata, else
+    1) Prometheus container label `gpu_rental_package` (from Coder template
+       docker labels, exposed by cAdvisor), else
+    2) coder agent metadata key `gpu_rental_package_code` if present, else
     3) None (in which case the container is ignored in package mode).
     """
-    if agent_metadata and isinstance(agent_metadata, dict):
-        pkg_code = agent_metadata.get("gpu_rental_package_code")
+    if container_info and isinstance(container_info, dict):
+        pkg_code = (container_info.get("package") or "").strip()
         if pkg_code:
             return pkg_code
 
-    # Fallback: keep behaviour predictable with current templates. This is brittle
-    # and should be replaced by an explicit label/metadata once Coder templates
-    # ship that attribute.
-    template_guess = None
-    if name.startswith("coder-"):
-        rest = name[len("coder-"):]
-        if "-" in rest:
-            # container_name is coder-<owner>-<workspace>
-            _ws = rest.split("-", 1)[-1]
-            # We cannot reliably infer the template from the workspace name alone,
-            # so use owner-level default mapping below only if configured.
-            template_guess = None
+    if agent_metadata and isinstance(agent_metadata, dict):
+        pkg_code = (agent_metadata.get("gpu_rental_package_code") or "").strip()
+        if pkg_code:
+            return pkg_code
 
-    if template_guess:
-        return _TEMPLATE_TO_PACKAGE.get(template_guess)
-
-    # Optional: per-owner fallback.  No default mapping is provided here because
-    # it would be wrong for mixed setups.  Operators who want automatic fallback
-    # should either set gpu_rental_package_code in Coder metadata or extend this
-    # function explicitly.
     return None
 
 
@@ -175,10 +161,13 @@ def http(method, url, data=None, header=None, timeout=20):
         return e.code, (json.loads(raw) if raw else {})
 
 
-def fetch_metric(metric):
-    """Return {container_name: latest_value} for a cAdvisor series.
+def fetch_metric_with_labels(metric):
+    """Instant query -> {container_name: (value, labels)}.
 
-    NB: instant-query responses carry `value: [ts, str]` (not `values` —
+    Labels are needed for package attribution: cAdvisor exposes the Docker
+    label `gpu_rental_package` as `container_label_gpu_rental_package`.
+
+    NB: instant-query responses carry `value: [ts, str]` (not `values` --
     that shape only exists on range-query responses), so check `value`.
     """
     out = {}
@@ -188,32 +177,62 @@ def fetch_metric(metric):
     if status != 200 or not data or data.get("status") != "success":
         return out
     for row in data["data"]["result"]:
-        name = row.get("metric", {}).get("name")
+        labels = row.get("metric", {}) or {}
+        name = labels.get("name")
         value = row.get("value")
         if name and value:
-            out[name] = float(value[1])
+            try:
+                out[name] = (float(value[1]), dict(labels))
+            except (TypeError, ValueError):
+                continue
     return out
 
 
+def fetch_metric(metric):
+    """Return {container_name: latest_value} for a cAdvisor series."""
+    return {name: value for name, (value, _labels)
+            in fetch_metric_with_labels(metric).items()}
+
+
 def fetch_containers():
-    """Return {container_name: owner} for running Coder workspaces.
+    """Return {container_name: {owner, package}} for running Coder workspaces.
 
     cAdvisor tags every workspace container with the `coder.owner` label,
-    exposed to Prometheus as `container_label_coder_owner`.  The label query in
-    fetch_metric() already guarantees we only see Coder workspaces; the owner is
-    derived from the container name `coder-<owner>-<workspace>` (works even when
-    label indexing lags behind by one scrape).
+    exposed to Prometheus as `container_label_coder_owner`, plus the billing
+    package label `gpu_rental_package` (declared in the Coder templates),
+    exposed as `container_label_gpu_rental_package`. The label query in
+    fetch_metric() already guarantees we only see Coder workspaces; the owner
+    is derived from the container name `coder-<owner>-<workspace>` (works even
+    when label indexing lags behind by one scrape) while the package code is
+    read from the Prometheus label when present.
     """
     out = {}
-    for name in fetch_metric("container_cpu_usage_seconds_total"):
+    rows = fetch_metric_with_labels("container_cpu_usage_seconds_total")
+    for name, row in rows.items():
+        _value, labels = row
         if not name.startswith("coder-"):
             continue
         idx = name.rfind("-")
         if idx < len("coder-"):
             continue
-        owner = name[len("coder-"):idx]
-        out[name] = owner or None
-    return {k: v for k, v in out.items() if v}
+        owner = labels.get("container_label_coder_owner") or name[len("coder-"):idx]
+        package = (labels.get("container_label_gpu_rental_package") or "").strip() or None
+        if not owner:
+            continue
+        out[name] = {"owner": owner, "package": package}
+    # Fallback for Prometheus servers that drop label detail (or very old
+    # cAdvisor versions): keep owner-only discovery so billing never goes blind.
+    if not out:
+        for name in fetch_metric("container_cpu_usage_seconds_total"):
+            if not name.startswith("coder-"):
+                continue
+            idx = name.rfind("-")
+            if idx < len("coder-"):
+                continue
+            owner = name[len("coder-"):idx]
+            if owner:
+                out[name] = {"owner": owner, "package": None}
+    return out
 
 
 def fetch_agent_metadata(owner, containers):
@@ -290,15 +309,22 @@ class State:
 
 
 def collect(state, containers):
-    """Read current values; return per-owner deltas since the last cycle."""
+    """Read current values; return per-owner deltas since the last cycle.
+
+    `containers` maps container name -> {"owner": ..., "package": ...} (see
+    fetch_containers). Older callers may still pass name -> owner strings;
+    both shapes are accepted here.
+    """
     owners = {}
     for code, series_list in USAGE.items():
         for metric, is_counter, factor in series_list:
             current = fetch_metric(metric)
-            for name in list(containers):
+            for name, info in list(containers.items()):
                 if name not in current:
                     continue
-                owner = containers[name]
+                owner = info.get("owner") if isinstance(info, dict) else info
+                if not owner:
+                    continue
                 value = current[name] * factor
                 key = f"{name}:{code}"
                 prev = state.counter(key)
@@ -362,9 +388,13 @@ def send_events(state, owners, containers, metric_snapshots, agent_metadata):
         return
 
     # Package mode.
-    for name, owner in containers.items():
+    for name, info in containers.items():
+        owner = info.get("owner") if isinstance(info, dict) else info
+        if not owner:
+            continue
         pkg_code = package_code_for_container(
-            name, owner, agent_metadata.get(owner, {}).get(name))
+            name, owner, agent_metadata.get(owner, {}).get(name),
+            container_info=info if isinstance(info, dict) else None)
         if not pkg_code or pkg_code not in PACKAGES:
             continue
         duration = container_active_duration_seconds(
@@ -388,6 +418,9 @@ def send_events(state, owners, containers, metric_snapshots, agent_metadata):
                 f"  ! package event rejected {owner}:{pkg_code} "
                 f"(http {status}): {resp}"
             )
+
+
+def lago_subscription(state, owner):
     """Get/create the Lago subscription id for an owner (self-healing)."""
     cached = state.kv_get(f"sub:{owner}")
     if cached:

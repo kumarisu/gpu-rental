@@ -311,144 +311,36 @@
       },
       {
         "id": 8,
-        "type": "table",
+        "type": "text",
         "title": "Package catalog (static reference)",
+        "description": "Must match PACKAGES in billing/sync/sync.py and billing/lago/bootstrap.py",
         "datasource": {
-          "type": "prometheus",
-          "uid": "<UID_PROMETHEUS>"
+          "type": "datasource",
+          "uid": "-- Mixed --"
         },
         "gridPos": {
           "h": 8,
           "w": 12,
           "x": 0,
-          "y": 0
+          "y": 44
         },
         "options": {
-          "showHeader": true,
-          "showRowNumber": false,
-          "cellLayout": "auto",
-          "tabularNavigation": false,
-          "footerSize": 16
+          "mode": "markdown",
+          "content": "| package_code | display_name | price_cents | price_usd |\n|---|---|---|---|\n| basic-cpu-2-ram-8 | Basic CPU (2 cores / 8GB RAM) | 500 | $5.00 |\n| pro-cpu-8-ram-32 | Pro CPU (8 cores / 32GB RAM) | 2000 | $20.00 |\n| gpu-cuda-1-ram-32 | GPU CUDA (1 GPU / 32GB RAM) | 5000 | $50.00 |"
         },
         "fieldConfig": {
-          "defaults": {
-            "currency": {
-              "unit": "none"
-            },
-            "mappings": [],
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {
-                  "color": "green",
-                  "value": null
-                }
-              ]
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "price_usd"
-              },
-              "properties": [
-                {
-                  "id": "custom.displayMode",
-                  "value": "currency"
-                }
-              ]
-            }
-          ]
-        },
-        "columns": [
-          {
-            "text": "package_code",
-            "value": "package_code"
-          },
-          {
-            "text": "display_name",
-            "value": "display_name"
-          },
-          {
-            "text": "price_cents",
-            "value": "price_cents"
-          },
-          {
-            "text": "price_usd",
-            "value": "price_usd"
-          }
-        ],
-        "rows": [
-          {
-            "cells": {
-              "package_code": {
-                "value": "basic-cpu-2-ram-8",
-                "text": "basic-cpu-2-ram-8"
-              },
-              "display_name": {
-                "value": "Basic CPU (2 cores / 8GB RAM)",
-                "text": "Basic CPU (2 cores / 8GB RAM)"
-              },
-              "price_cents": {
-                "value": 500,
-                "text": "500¢"
-              },
-              "price_usd": {
-                "value": 5.0,
-                "text": "$5.00"
-              }
-            }
-          },
-          {
-            "cells": {
-              "package_code": {
-                "value": "gpu-cuda-1-ram-32",
-                "text": "gpu-cuda-1-ram-32"
-              },
-              "display_name": {
-                "value": "GPU CUDA (1 GPU / 32GB RAM)",
-                "text": "GPU CUDA (1 GPU / 32GB RAM)"
-              },
-              "price_cents": {
-                "value": 5000,
-                "text": "5000¢"
-              },
-              "price_usd": {
-                "value": 50.0,
-                "text": "$50.00"
-              }
-            }
-          },
-          {
-            "cells": {
-              "package_code": {
-                "value": "pro-cpu-8-ram-32",
-                "text": "pro-cpu-8-ram-32"
-              },
-              "display_name": {
-                "value": "Pro CPU (8 cores / 32GB RAM)",
-                "text": "Pro CPU (8 cores / 32GB RAM)"
-              },
-              "price_cents": {
-                "value": 2000,
-                "text": "2000¢"
-              },
-              "price_usd": {
-                "value": 20.0,
-                "text": "$20.00"
-              }
-            }
-          }
-        ]
+          "defaults": {},
+          "overrides": []
+        }
       },
       {
         "id": 9,
         "type": "timeseries",
-        "title": "CPU seconds snapshot (per container, sync metric source)",
+        "title": "Active workspaces per package (live, from cAdvisor labels)",
+        "description": "Counts running Coder containers grouped by cAdvisor label container_label_gpu_rental_package (Docker label gpu_rental_package from Coder templates). billing-sync uses this same label as source 1 for package_code.",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
@@ -457,8 +349,8 @@
               "type": "prometheus",
               "uid": "<UID_PROMETHEUS>"
             },
-            "expr": "sum by (container_label_coder_owner, name) (container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"})",
-            "legendFormat": "{{container_label_coder_owner}} / {{name}}",
+            "expr": "count by (container_label_gpu_rental_package) (container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"})",
+            "legendFormat": "{{container_label_gpu_rental_package}}",
             "range": true
           }
         ],
@@ -483,9 +375,53 @@
           "h": 8,
           "w": 12,
           "x": 12,
-          "y": 0
+          "y": 44
+        }
+      },
+      {
+        "id": 10,
+        "type": "timeseries",
+        "title": "Active workspaces detail (owner x package x container)",
+        "description": "Same source as sync metric snapshot, broken down to debug owner/package attribution.",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "<UID_PROMETHEUS>"
         },
-        "description": "Same counter snapshot used by billing-sync to determine active containers."
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "<UID_PROMETHEUS>"
+            },
+            "expr": "sum by (container_label_coder_owner, container_label_gpu_rental_package, name) (container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"})",
+            "legendFormat": "{{container_label_coder_owner}} / {{container_label_gpu_rental_package}} / {{name}}",
+            "range": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 52
+        }
       }
     ],
     "timezone": "browser"

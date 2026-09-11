@@ -162,4 +162,8 @@ resource "docker_container" "workspace" {
     label = "coder.workspace_name"
     value = data.coder_workspace.me.name
   }
+  labels {
+    label = "gpu_rental_package"
+    value = "gpu-cuda-1-ram-32"
+  }
 }
