@@ -17,14 +17,14 @@
         "title": "CPU used (cores) — per user",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "sum by (container_label_coder_owner) (rate(container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"}[5m]))",
             "legendFormat": "{{container_label_coder_owner}}",
@@ -62,14 +62,14 @@
         "title": "Memory used (GiB) — per user",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "sum by (container_label_coder_owner) (container_memory_usage_bytes{container_label_coder_owner!=\"\"}) / 1073741824",
             "legendFormat": "{{container_label_coder_owner}}",
@@ -106,14 +106,14 @@
         "title": "Network in (KiB/s) — per user",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "sum by (container_label_coder_owner) (rate(container_network_receive_bytes_total{container_label_coder_owner!=\"\"}[5m])) / 1024",
             "legendFormat": "{{container_label_coder_owner}}",
@@ -150,14 +150,14 @@
         "title": "Network out (KiB/s) — per user",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "sum by (container_label_coder_owner) (rate(container_network_transmit_bytes_total{container_label_coder_owner!=\"\"}[5m])) / 1024",
             "legendFormat": "{{container_label_coder_owner}}",
@@ -194,14 +194,14 @@
         "title": "GPU utilization % (host GPUs) — optional exporter",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "gpu_utilization_percent{gpu=~\".*\"}",
             "legendFormat": "gpu {{gpu}}",
@@ -239,14 +239,14 @@
         "title": "Disk write (KiB/s) — per user",
         "datasource": {
           "type": "prometheus",
-          "uid": "__DS_PROMETHEUS__"
+          "uid": "<UID_PROMETHEUS>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "prometheus",
-              "uid": "__DS_PROMETHEUS__"
+              "uid": "<UID_PROMETHEUS>"
             },
             "expr": "sum by (container_label_coder_owner) (rate(container_fs_writes_bytes_total{container_label_coder_owner!=\"\"}[5m])) / 1024",
             "legendFormat": "{{container_label_coder_owner}}",
@@ -284,14 +284,14 @@
         "description": "All docker logs via Loki. Filter per workspace e.g. {container_name=\"coder-mike-kuma\"}.",
         "datasource": {
           "type": "loki",
-          "uid": "__DS_LOKI__"
+          "uid": "<UID_LOKI>"
         },
         "targets": [
           {
             "refId": "A",
             "datasource": {
               "type": "loki",
-              "uid": "__DS_LOKI__"
+              "uid": "<UID_LOKI>"
             },
             "expr": "{container_name=~\".+\"}",
             "queryType": "range"
@@ -308,6 +308,184 @@
           "x": 0,
           "y": 32
         }
+      },
+      {
+        "id": 8,
+        "type": "table",
+        "title": "Package catalog (static reference)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "<UID_PROMETHEUS>"
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        },
+        "options": {
+          "showHeader": true,
+          "showRowNumber": false,
+          "cellLayout": "auto",
+          "tabularNavigation": false,
+          "footerSize": 16
+        },
+        "fieldConfig": {
+          "defaults": {
+            "currency": {
+              "unit": "none"
+            },
+            "mappings": [],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "price_usd"
+              },
+              "properties": [
+                {
+                  "id": "custom.displayMode",
+                  "value": "currency"
+                }
+              ]
+            }
+          ]
+        },
+        "columns": [
+          {
+            "text": "package_code",
+            "value": "package_code"
+          },
+          {
+            "text": "display_name",
+            "value": "display_name"
+          },
+          {
+            "text": "price_cents",
+            "value": "price_cents"
+          },
+          {
+            "text": "price_usd",
+            "value": "price_usd"
+          }
+        ],
+        "rows": [
+          {
+            "cells": {
+              "package_code": {
+                "value": "basic-cpu-2-ram-8",
+                "text": "basic-cpu-2-ram-8"
+              },
+              "display_name": {
+                "value": "Basic CPU (2 cores / 8GB RAM)",
+                "text": "Basic CPU (2 cores / 8GB RAM)"
+              },
+              "price_cents": {
+                "value": 500,
+                "text": "500¢"
+              },
+              "price_usd": {
+                "value": 5.0,
+                "text": "$5.00"
+              }
+            }
+          },
+          {
+            "cells": {
+              "package_code": {
+                "value": "gpu-cuda-1-ram-32",
+                "text": "gpu-cuda-1-ram-32"
+              },
+              "display_name": {
+                "value": "GPU CUDA (1 GPU / 32GB RAM)",
+                "text": "GPU CUDA (1 GPU / 32GB RAM)"
+              },
+              "price_cents": {
+                "value": 5000,
+                "text": "5000¢"
+              },
+              "price_usd": {
+                "value": 50.0,
+                "text": "$50.00"
+              }
+            }
+          },
+          {
+            "cells": {
+              "package_code": {
+                "value": "pro-cpu-8-ram-32",
+                "text": "pro-cpu-8-ram-32"
+              },
+              "display_name": {
+                "value": "Pro CPU (8 cores / 32GB RAM)",
+                "text": "Pro CPU (8 cores / 32GB RAM)"
+              },
+              "price_cents": {
+                "value": 2000,
+                "text": "2000¢"
+              },
+              "price_usd": {
+                "value": 20.0,
+                "text": "$20.00"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "type": "timeseries",
+        "title": "CPU seconds snapshot (per container, sync metric source)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "__DS_PROMETHEUS__"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "<UID_PROMETHEUS>"
+            },
+            "expr": "sum by (container_label_coder_owner, name) (container_cpu_usage_seconds_total{container_label_coder_owner!=\"\"})",
+            "legendFormat": "{{container_label_coder_owner}} / {{name}}",
+            "range": true
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          }
+        },
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        },
+        "description": "Same counter snapshot used by billing-sync to determine active containers."
       }
     ],
     "timezone": "browser"
