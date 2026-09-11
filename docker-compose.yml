@@ -455,6 +455,10 @@ services:
       LAGO_EMAIL_DOMAIN: ${LAGO_EMAIL_DOMAIN:-gpu.local}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-60}
       SYNC_MIN_DELTA: ${SYNC_MIN_DELTA:-0.000001}
+      # "package"  → one workspace_package event per active workspace (package
+      #               price model — the default).
+      # "metric"   → legacy per-metric events (cpu_seconds, ram_gb_hours, …).
+      SYNC_MODE: ${SYNC_MODE:-package}
     volumes:
       - billing_sync_state:/data
     depends_on:

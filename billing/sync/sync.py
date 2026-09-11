@@ -47,12 +47,12 @@ STATE_DB = os.environ.get("SYNC_STATE_DB", "/data/state.db")
 # 4 separate per-metric events it sends ONE package-level event per active
 # workspace package.
 #
-# Package code is resolved per container via the coder agent metadata key
-# `gpu_rental_package_code` when present, otherwise it falls back to the current
-# container template mapping (TEMPLATE_TO_PACKAGE) below.  TEMPLATE_TO_PACKAGE is
-# the simplest interop with the existing Coder templates (cpu-base / gpu-cuda)
-# and can be removed once the Coder templates explicitly expose the package code
-# through metadata.
+# The package code is resolved per container from the Docker label
+# `gpu_rental_package` (declared in the Coder templates cpu-base / gpu-cuda),
+# which cAdvisor exposes to Prometheus as `container_label_gpu_rental_package`
+# and which fetch_containers() reads via fetch_metric_with_labels(). The coder
+# agent metadata key `gpu_rental_package_code` is a secondary source for
+# operators who prefer to override the package at runtime.
 # -----------------------------------------------------------------------------
 SYNC_MODE = os.environ.get("SYNC_MODE", "package")  # "metric" | "package"
 
@@ -72,11 +72,6 @@ PACKAGES = {
         "display_name": "GPU CUDA (1 GPU / 32GB RAM)",
         "price_cents": 5000,
     },
-}
-
-_TEMPLATE_TO_PACKAGE = {
-    "cpu-base": "basic-cpu-2-ram-8",
-    "gpu-cuda": "gpu-cuda-1-ram-32",
 }
 
 

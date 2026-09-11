@@ -3,6 +3,7 @@
 
 Creates (if missing):
   * billable metrics   cpu_seconds, ram_gb_hours, network_gb, disk_write_gb
+  * billable metric    workspace_package  (package price model)
   * a usage plan       (per_unit charges referencing the metrics)
   * one customer + subscription per demo user (LAGO_DEMO_USERS)
 

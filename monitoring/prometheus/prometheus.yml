@@ -2,6 +2,10 @@
 # Relies on cAdvisor's Docker labels: every Coder workspace container carries
 # `coder.owner` / `coder.workspace_id` labels, visible here as
 # `container_label_coder_owner`, `container_label_coder_workspace_id`, …
+# The Coder templates also set the billing label `gpu_rental_package`, which
+# cAdvisor exposes as `container_label_gpu_rental_package`. This is how the
+# package code travels from template → container → cAdvisor → Prometheus, and
+# billing-sync reads it back when sending package events (SYNC_MODE=package).
 global:
   scrape_interval: 5s
   evaluation_interval: 15s
